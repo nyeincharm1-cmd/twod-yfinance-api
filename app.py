@@ -7,7 +7,8 @@ app = Flask(__name__)
 
 SYMBOL = "^SET.BK"
 
-CACHE_SECONDS = 60
+# 5 minutes cache
+CACHE_SECONDS = 300
 
 cached_today = None
 cached_time = 0
@@ -38,12 +39,13 @@ def get_market_session():
     now = thailand_now()
     current = now.hour * 60 + now.minute
 
-    # User requested time
-    morning_open = 480      # 08:00 AM
-    morning_close = 721     # 12:01 PM
+    # Morning: 08:00 AM - 12:01 PM
+    morning_open = 480
+    morning_close = 721
 
-    evening_open = 780      # 01:00 PM
-    evening_close = 991     # 04:31 PM
+    # Evening: 01:00 PM - 04:31 PM
+    evening_open = 780
+    evening_close = 991
 
     status = "CLOSE"
     session = "none"
@@ -84,28 +86,7 @@ def get_market_session():
     }
 
 
-def fetch_market_data():
-    ticker = yf.Ticker(SYMBOL)
-
-    hist = ticker.history(period="1d", interval="1m")
-
-    if hist is None or hist.empty:
-        raise Exception("No market data found")
-
-    hist = hist.dropna()
-
-    if hist.empty:
-        raise Exception("No valid market data found")
-
-    last_row = hist.tail(1).iloc[0]
-
-    close_price = float(last_row["Close"])
-
-    try:
-        market_value = int(last_row["Volume"])
-    except:
-        market_value = 0
-
+def build_result_data(close_price, market_value, data_source):
     set_decimal_two = get_set_decimal_two(close_price)
 
     set_last_digit = set_decimal_two[-1]
@@ -150,15 +131,54 @@ def fetch_market_data():
         "eveningResult": evening_result,
 
         "updatedAt": now.strftime("%Y-%m-%d %H:%M:%S"),
-        "cached": False
+        "cached": False,
+        "dataSource": data_source
     }
+
+
+def fetch_market_data():
+    ticker = yf.Ticker(SYMBOL)
+
+    # 5 days သုံးထားတာက စျေးပိတ်ချိန်/holiday တွေမှာ last data ရနိုင်အောင်
+    hist = ticker.history(period="5d", interval="1m")
+
+    if hist is None or hist.empty:
+        raise Exception("No market data found")
+
+    hist = hist.dropna()
+
+    if hist.empty:
+        raise Exception("No valid market data found")
+
+    last_row = hist.tail(1).iloc[0]
+
+    close_price = float(last_row["Close"])
+
+    try:
+        market_value = int(last_row["Volume"])
+    except:
+        market_value = 0
+
+    return build_result_data(close_price, market_value, "yfinance")
+
+
+def get_fallback_data(error_message):
+    # yfinance rate limit ဖြစ်ရင် app error မပြအောင် backup data ပြမယ်
+    close_price = 1611.99
+    market_value = 0
+
+    data = build_result_data(close_price, market_value, "fallback")
+    data["cached"] = True
+    data["lastError"] = error_message
+
+    return data
 
 
 @app.route("/")
 def home():
     return jsonify({
         "success": True,
-        "message": "YFinance SET API running with session time 08:00-12:01 and 13:00-16:31"
+        "message": "YFinance SET API running with cache and fallback"
     })
 
 
@@ -170,6 +190,7 @@ def today():
 
     now_time = time.time()
 
+    # cache ရှိပြီး 5 minutes မကျော်သေးရင် yfinance ကိုမခေါ်တော့ဘူး
     if cached_today is not None and now_time - cached_time < CACHE_SECONDS:
         response = dict(cached_today)
         response["cached"] = True
@@ -188,16 +209,20 @@ def today():
     except Exception as e:
         last_error = str(e)
 
+        # အရင် successful data ရှိရင် အဲ့ဒါပြန်ပြ
         if cached_today is not None:
             response = dict(cached_today)
             response["cached"] = True
             response["lastError"] = last_error
             return jsonify(response)
 
-        return jsonify({
-            "success": False,
-            "message": last_error
-        }), 429
+        # successful data မရှိသေးရင် fallback data ပြ
+        fallback_data = get_fallback_data(last_error)
+
+        cached_today = fallback_data
+        cached_time = now_time
+
+        return jsonify(fallback_data)
 
 
 @app.route("/status")
