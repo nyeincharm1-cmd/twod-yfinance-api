@@ -7,16 +7,16 @@ app = Flask(__name__)
 
 SYMBOL = "^SET.BK"
 
-# 5 minutes cache
-CACHE_SECONDS = 300
+# 10 seconds live cache
+CACHE_SECONDS = 10
 
 cached_today = None
 cached_time = 0
 last_error = ""
 
 
-def thailand_now():
-    return datetime.utcnow() + timedelta(hours=7)
+def myanmar_now():
+    return datetime.utcnow() + timedelta(hours=6, minutes=30)
 
 
 def get_last_digit(value):
@@ -36,9 +36,10 @@ def get_set_decimal_two(close_price):
 
 
 def get_market_session():
-    now = thailand_now()
+    now = myanmar_now()
     current = now.hour * 60 + now.minute
 
+    # Myanmar Time
     # Morning: 08:00 AM - 12:01 PM
     morning_open = 480
     morning_close = 721
@@ -50,36 +51,43 @@ def get_market_session():
     status = "CLOSE"
     session = "none"
     display_session = "none"
+    next_session = "Morning Session 08:00 AM"
 
     if current >= morning_open and current <= morning_close:
         status = "OPEN"
         session = "morning"
         display_session = "morning"
+        next_session = "Evening Session 01:00 PM"
 
     elif current > morning_close and current < evening_open:
         status = "CLOSE"
         session = "none"
         display_session = "morning"
+        next_session = "Evening Session 01:00 PM"
 
     elif current >= evening_open and current <= evening_close:
         status = "OPEN"
         session = "evening"
         display_session = "evening"
+        next_session = "Tomorrow Morning 08:00 AM"
 
     elif current > evening_close:
         status = "CLOSE"
         session = "none"
         display_session = "evening"
+        next_session = "Tomorrow Morning 08:00 AM"
 
     else:
         status = "CLOSE"
         session = "none"
         display_session = "none"
+        next_session = "Morning Session 08:00 AM"
 
     return {
         "status": status,
         "session": session,
         "displaySession": display_session,
+        "nextSession": next_session,
         "current": current,
         "time": now.strftime("%H:%M:%S"),
         "date": now.strftime("%Y-%m-%d")
@@ -108,7 +116,7 @@ def build_result_data(close_price, market_value, data_source):
         morning_result = "--"
         evening_result = result_2d
 
-    now = thailand_now()
+    now = myanmar_now()
 
     return {
         "success": True,
@@ -118,6 +126,7 @@ def build_result_data(close_price, market_value, data_source):
         "status": session_info["status"],
         "session": session_info["session"],
         "displaySession": session_info["displaySession"],
+        "nextSession": session_info["nextSession"],
 
         "set": f"{close_price:.2f}",
         "value": str(market_value),
@@ -132,14 +141,14 @@ def build_result_data(close_price, market_value, data_source):
 
         "updatedAt": now.strftime("%Y-%m-%d %H:%M:%S"),
         "cached": False,
-        "dataSource": data_source
+        "dataSource": data_source,
+        "timezone": "Myanmar Time UTC+6:30"
     }
 
 
 def fetch_market_data():
     ticker = yf.Ticker(SYMBOL)
 
-    # 5 days သုံးထားတာက စျေးပိတ်ချိန်/holiday တွေမှာ last data ရနိုင်အောင်
     hist = ticker.history(period="5d", interval="1m")
 
     if hist is None or hist.empty:
@@ -163,7 +172,6 @@ def fetch_market_data():
 
 
 def get_fallback_data(error_message):
-    # yfinance rate limit ဖြစ်ရင် app error မပြအောင် backup data ပြမယ်
     close_price = 1611.99
     market_value = 0
 
@@ -178,7 +186,7 @@ def get_fallback_data(error_message):
 def home():
     return jsonify({
         "success": True,
-        "message": "YFinance SET API running with cache and fallback"
+        "message": "YFinance SET API running with Myanmar time UTC+6:30"
     })
 
 
@@ -190,7 +198,6 @@ def today():
 
     now_time = time.time()
 
-    # cache ရှိပြီး 5 minutes မကျော်သေးရင် yfinance ကိုမခေါ်တော့ဘူး
     if cached_today is not None and now_time - cached_time < CACHE_SECONDS:
         response = dict(cached_today)
         response["cached"] = True
@@ -209,14 +216,12 @@ def today():
     except Exception as e:
         last_error = str(e)
 
-        # အရင် successful data ရှိရင် အဲ့ဒါပြန်ပြ
         if cached_today is not None:
             response = dict(cached_today)
             response["cached"] = True
             response["lastError"] = last_error
             return jsonify(response)
 
-        # successful data မရှိသေးရင် fallback data ပြ
         fallback_data = get_fallback_data(last_error)
 
         cached_today = fallback_data
@@ -234,9 +239,11 @@ def status():
         "status": session_info["status"],
         "session": session_info["session"],
         "displaySession": session_info["displaySession"],
+        "nextSession": session_info["nextSession"],
         "current": session_info["current"],
         "time": session_info["time"],
-        "date": session_info["date"]
+        "date": session_info["date"],
+        "timezone": "Myanmar Time UTC+6:30"
     })
 
 
