@@ -1,10 +1,17 @@
 from flask import Flask, jsonify
 import yfinance as yf
 from datetime import datetime, timedelta
+import time
 
 app = Flask(__name__)
 
 SYMBOL = "^SET.BK"
+
+CACHE_SECONDS = 60
+
+cached_today = None
+cached_time = 0
+last_error = ""
 
 def get_last_digit(value):
     text = str(value)
@@ -20,81 +27,98 @@ def get_set_decimal_two(close_price):
     decimal_part = set_text.split(".")[1]
     return decimal_part[-2:]
 
+def fetch_market_data():
+    ticker = yf.Ticker(SYMBOL)
+
+    hist = ticker.history(period="1d", interval="1m")
+
+    if hist is None or hist.empty:
+        raise Exception("No market data found")
+
+    hist = hist.dropna()
+
+    if hist.empty:
+        raise Exception("No valid market data found")
+
+    last_row = hist.tail(1).iloc[0]
+
+    close_price = float(last_row["Close"])
+
+    try:
+        market_value = int(last_row["Volume"])
+    except:
+        market_value = 0
+
+    set_decimal_two = get_set_decimal_two(close_price)
+
+    set_last_digit = set_decimal_two[-1]
+    value_last_digit = get_last_digit(market_value)
+
+    result_2d = set_last_digit + value_last_digit
+
+    thailand_time = datetime.utcnow() + timedelta(hours=7)
+
+    return {
+        "success": True,
+        "date": thailand_time.strftime("%Y-%m-%d"),
+        "symbol": SYMBOL,
+
+        "set": f"{close_price:.2f}",
+        "value": str(market_value),
+
+        "setDecimalTwo": set_decimal_two,
+        "setLastDigit": set_last_digit,
+        "valueLastDigit": value_last_digit,
+
+        "result2d": result_2d,
+        "morningResult": result_2d,
+        "eveningResult": result_2d,
+
+        "updatedAt": thailand_time.strftime("%Y-%m-%d %H:%M:%S"),
+        "cached": False
+    }
+
 @app.route("/")
 def home():
     return jsonify({
         "success": True,
-        "message": "YFinance SET API running"
+        "message": "YFinance SET API running with cache"
     })
 
 @app.route("/today")
 def today():
+    global cached_today
+    global cached_time
+    global last_error
+
+    now_time = time.time()
+
+    if cached_today is not None and now_time - cached_time < CACHE_SECONDS:
+        cached_today["cached"] = True
+        cached_today["lastError"] = last_error
+        return jsonify(cached_today)
+
     try:
-        ticker = yf.Ticker(SYMBOL)
+        fresh_data = fetch_market_data()
 
-        # last 5 days 1 minute data
-        hist = ticker.history(period="5d", interval="1m")
+        cached_today = fresh_data
+        cached_time = now_time
+        last_error = ""
 
-        if hist is None or hist.empty:
-            return jsonify({
-                "success": False,
-                "message": "No market data found"
-            }), 404
-
-        hist = hist.dropna()
-
-        if hist.empty:
-            return jsonify({
-                "success": False,
-                "message": "No valid market data found"
-            }), 404
-
-        last_row = hist.tail(1).iloc[0]
-
-        close_price = float(last_row["Close"])
-
-        try:
-            market_value = int(last_row["Volume"])
-        except:
-            market_value = 0
-
-        # Example: SET 1342.56 -> 56
-        set_decimal_two = get_set_decimal_two(close_price)
-
-        # 2D rule:
-        # SET last decimal digit + Value last digit
-        # 1342.56 + 45821900 => 6 + 0 = 60
-        set_last_digit = set_decimal_two[-1]
-        value_last_digit = get_last_digit(market_value)
-
-        result_2d = set_last_digit + value_last_digit
-
-        thailand_time = datetime.utcnow() + timedelta(hours=7)
-
-        return jsonify({
-            "success": True,
-            "date": thailand_time.strftime("%Y-%m-%d"),
-            "symbol": SYMBOL,
-
-            "set": f"{close_price:.2f}",
-            "value": str(market_value),
-
-            "setDecimalTwo": set_decimal_two,
-            "setLastDigit": set_last_digit,
-            "valueLastDigit": value_last_digit,
-
-            "result2d": result_2d,
-            "morningResult": result_2d,
-            "eveningResult": result_2d,
-
-            "updatedAt": thailand_time.strftime("%Y-%m-%d %H:%M:%S")
-        })
+        return jsonify(fresh_data)
 
     except Exception as e:
+        last_error = str(e)
+
+        if cached_today is not None:
+            cached_today["cached"] = True
+            cached_today["lastError"] = last_error
+            return jsonify(cached_today)
+
         return jsonify({
             "success": False,
-            "message": str(e)
-        }), 500
+            "message": last_error
+        }), 429
 
 @app.route("/status")
 def status():
