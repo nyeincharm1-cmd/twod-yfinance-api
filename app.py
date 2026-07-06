@@ -562,8 +562,6 @@ def get_finmind_tw_latest_info():
         "triedDates": []
     }
 
-    # ဒီ dataset က end_date ထည့်လို့မရပါ
-    # start_date တစ်ခုတည်းနဲ့ နောက်ပြန် 14 ရက်ထိ စမ်းမယ်
     for day_back in range(0, 14):
         check_date = (taiwan_now() - timedelta(days=day_back)).strftime("%Y-%m-%d")
 
@@ -818,6 +816,19 @@ def normalize_history(raw_data):
         if day_counter < max_days_to_enrich:
             modern_data = get_modern_internet_for_date(date_iso, False)
             modern_data["morningTW"] = tw_result
+
+        # History raw 9:30 / 2:00 data မရရင် final result နဲ့ fallback ပြမယ်
+        if modern_data["morningModern"] == "--":
+            modern_data["morningModern"] = twod_or_dash(item_1100)
+
+        if modern_data["morningInternet"] == "--":
+            modern_data["morningInternet"] = twod_or_dash(item_1201)
+
+        if modern_data["eveningModern"] == "--":
+            modern_data["eveningModern"] = twod_or_dash(item_1500)
+
+        if modern_data["eveningInternet"] == "--":
+            modern_data["eveningInternet"] = twod_or_dash(item_1630)
 
         day_data = {
             "date": date_slash,
