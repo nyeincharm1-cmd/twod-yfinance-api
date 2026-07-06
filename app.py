@@ -3,7 +3,6 @@ from datetime import datetime, timedelta
 import time
 import os
 import json
-import ssl
 import gzip
 import zlib
 from urllib.request import urlopen, Request
@@ -27,19 +26,8 @@ THAI_HISTORY_URL = os.environ.get(
     "https://api.thaistock2d.com/history"
 )
 
-FINMIND_API_URL = os.environ.get(
-    "FINMIND_API_URL",
-    "https://api.finmindtrade.com/api/v4/data"
-)
-
-FINMIND_TOKEN = os.environ.get(
-    "FINMIND_TOKEN",
-    ""
-)
-
 CACHE_SECONDS = 10
 HISTORY_CACHE_SECONDS = 300
-TW_CACHE_SECONDS = 300
 
 cached_today = None
 cached_today_time = 0
@@ -47,16 +35,9 @@ cached_today_time = 0
 cached_history = None
 cached_history_time = 0
 
-cached_tw_info = None
-cached_tw_time = 0
-
 
 def myanmar_now():
     return datetime.utcnow() + timedelta(hours=6, minutes=30)
-
-
-def taiwan_now():
-    return datetime.utcnow() + timedelta(hours=8)
 
 
 def fetch_json(url):
@@ -71,12 +52,7 @@ def fetch_json(url):
     )
 
     try:
-        ssl_context = None
-
-        if "openapi.twse.com.tw" in url:
-            ssl_context = ssl._create_unverified_context()
-
-        with urlopen(request_obj, timeout=30, context=ssl_context) as response:
+        with urlopen(request_obj, timeout=30) as response:
             raw_body = response.read()
             encoding = str(response.headers.get("Content-Encoding", "")).lower()
 
@@ -92,21 +68,16 @@ def fetch_json(url):
             body = raw_body.decode("utf-8-sig", errors="replace").strip()
 
             if body == "":
-                raise Exception("Empty response from " + url)
+                raise Exception("Empty response")
 
             if not body.startswith("{") and not body.startswith("["):
-                raise Exception("Non JSON response from " + url + " => " + body[:200])
+                raise Exception("Non JSON response: " + body[:150])
 
             return json.loads(body)
 
     except HTTPError as e:
         body = e.read().decode("utf-8", errors="ignore")
         raise Exception(body)
-
-
-def build_url(base_url, params):
-    query = urlencode(params)
-    return base_url + "?" + query
 
 
 def get_market_session():
@@ -171,21 +142,112 @@ def value_or_dash(item, key):
     return str(value)
 
 
-def twod_or_dash(item):
-    if item is None:
+def get_set_value(item):
+    if item is None or not isinstance(item, dict):
         return "--"
 
-    value = item.get("twod", item.get("result", "--"))
+    possible_keys = ["set", "SET", "setIndex", "index"]
 
-    if value is None or str(value).strip() == "":
+    for key in possible_keys:
+        value = item.get(key)
+
+        if value is not None and str(value).strip() != "":
+            return str(value)
+
+    return "--"
+
+
+def get_market_value(item):
+    if item is None or not isinstance(item, dict):
+        return "--"
+
+    possible_keys = ["value", "val", "VALUE", "marketValue"]
+
+    for key in possible_keys:
+        value = item.get(key)
+
+        if value is not None and str(value).strip() != "":
+            return str(value)
+
+    return "--"
+
+
+def calculate_2d_from_set_value(set_value, market_value):
+    try:
+        set_text = str(set_value).replace(",", "").strip()
+        value_text = str(market_value).replace(",", "").strip()
+
+        if set_text == "" or value_text == "":
+            return "--"
+
+        if set_text == "--" or value_text == "--":
+            return "--"
+
+        if "." not in set_text:
+            return "--"
+
+        set_decimal = set_text.split(".")[1]
+
+        if len(set_decimal) == 0:
+            return "--"
+
+        first_digit = set_decimal[-1]
+
+        value_integer = value_text.split(".")[0]
+        value_digits = "".join(ch for ch in value_integer if ch.isdigit())
+
+        if len(value_digits) == 0:
+            return "--"
+
+        second_digit = value_digits[-1]
+
+        return first_digit + second_digit
+
+    except:
+        return "--"
+
+
+def normalize_2d_text(value):
+    if value is None:
         return "--"
 
     text = str(value).strip()
 
-    if len(text) == 1:
-        return "0" + text
+    if text == "":
+        return "--"
 
-    return text[-2:]
+    digits = "".join(ch for ch in text if ch.isdigit())
+
+    if len(digits) == 0:
+        return "--"
+
+    if len(digits) == 1:
+        return "0" + digits
+
+    return digits[-2:]
+
+
+def twod_or_dash(item):
+    if item is None or not isinstance(item, dict):
+        return "--"
+
+    set_value = get_set_value(item)
+    market_value = get_market_value(item)
+
+    calculated = calculate_2d_from_set_value(set_value, market_value)
+
+    if calculated != "--":
+        return calculated
+
+    value = item.get("twod", None)
+
+    if value is None:
+        value = item.get("result", None)
+
+    if value is None:
+        value = item.get("number", None)
+
+    return normalize_2d_text(value)
 
 
 def find_by_time(result_list, open_time):
@@ -247,29 +309,7 @@ def extract_time(item):
 
 
 def extract_twod(item):
-    if not isinstance(item, dict):
-        return "--"
-
-    value = item.get("twod", None)
-
-    if value is None:
-        value = item.get("result", None)
-
-    if value is None:
-        value = item.get("number", None)
-
-    if value is None:
-        return "--"
-
-    text = str(value).strip()
-
-    if text == "":
-        return "--"
-
-    if len(text) == 1:
-        return "0" + text
-
-    return text[-2:]
+    return twod_or_dash(item)
 
 
 def normalize_history_change_items(raw_data):
@@ -306,7 +346,8 @@ def normalize_history_change_items(raw_data):
 
 def fetch_change_history_for_date(date_iso, allow_current_fallback):
     try:
-        date_url = THAI_HISTORY_URL + "?date=" + date_iso
+        params = urlencode({"date": date_iso})
+        date_url = THAI_HISTORY_URL + "?" + params
         data = fetch_json(date_url)
         items = normalize_history_change_items(data)
 
@@ -435,203 +476,6 @@ def get_modern_internet_for_date(date_iso, allow_current_fallback=False):
     }
 
 
-def get_tw_result_from_index(index_value):
-    try:
-        text = str(index_value).replace(",", "").strip()
-
-        if text == "" or text == "--" or text.lower() == "none":
-            return "--"
-
-        if "." in text:
-            decimal_part = text.split(".")[1]
-
-            if len(decimal_part) >= 2:
-                return decimal_part[:2]
-
-            if len(decimal_part) == 1:
-                return decimal_part + "0"
-
-        digits = "".join(ch for ch in text if ch.isdigit())
-
-        if len(digits) >= 2:
-            return digits[-2:]
-
-        return "--"
-
-    except:
-        return "--"
-
-
-def normalize_finmind_items(raw_data):
-    if isinstance(raw_data, list):
-        return raw_data
-
-    if not isinstance(raw_data, dict):
-        return []
-
-    data = raw_data.get("data", [])
-
-    if isinstance(data, list):
-        return data
-
-    if isinstance(data, dict):
-        rows = []
-
-        keys = list(data.keys())
-        if len(keys) == 0:
-            return []
-
-        first_value = data.get(keys[0])
-
-        if isinstance(first_value, list):
-            row_count = len(first_value)
-
-            for i in range(row_count):
-                row = {}
-
-                for key in keys:
-                    value_list = data.get(key, [])
-
-                    if isinstance(value_list, list) and i < len(value_list):
-                        row[key] = value_list[i]
-
-                rows.append(row)
-
-            return rows
-
-    return []
-
-
-def get_item_time_text(item):
-    if not isinstance(item, dict):
-        return ""
-
-    value = item.get("date", "")
-
-    if value is None or str(value).strip() == "":
-        value = item.get("time", "")
-
-    return str(value)
-
-
-def get_taiex_value(item):
-    if not isinstance(item, dict):
-        return "--"
-
-    possible_keys = [
-        "TAIEX",
-        "taiex",
-        "TAIEXIndex",
-        "index",
-        "Index",
-        "value",
-        "Value",
-        "close",
-        "Close"
-    ]
-
-    for key in possible_keys:
-        value = item.get(key)
-
-        if value is not None and str(value).strip() != "":
-            return str(value)
-
-    return "--"
-
-
-def get_finmind_tw_latest_info():
-    global cached_tw_info
-    global cached_tw_time
-
-    now_time = time.time()
-
-    if cached_tw_info is not None and cached_tw_info.get("result", "--") != "--":
-        if now_time - cached_tw_time < TW_CACHE_SECONDS:
-            return cached_tw_info
-
-    info = {
-        "result": "--",
-        "latestTime": "--",
-        "latestTAIEX": "--",
-        "sourceUrl": FINMIND_API_URL,
-        "dataset": "TaiwanVariousIndicators5Seconds",
-        "startDate": "--",
-        "endDate": "none",
-        "count": 0,
-        "error": "",
-        "triedDates": []
-    }
-
-    for day_back in range(0, 14):
-        check_date = (taiwan_now() - timedelta(days=day_back)).strftime("%Y-%m-%d")
-
-        params = {
-            "dataset": "TaiwanVariousIndicators5Seconds",
-            "start_date": check_date
-        }
-
-        if FINMIND_TOKEN is not None and FINMIND_TOKEN.strip() != "":
-            params["token"] = FINMIND_TOKEN.strip()
-
-        url = build_url(FINMIND_API_URL, params)
-        info["triedDates"].append(check_date)
-
-        try:
-            raw_data = fetch_json(url)
-            items = normalize_finmind_items(raw_data)
-
-            if len(items) == 0:
-                if isinstance(raw_data, dict):
-                    msg = raw_data.get("msg", "")
-                    if msg:
-                        info["error"] = str(msg)
-                continue
-
-            latest_item = None
-            latest_time = ""
-
-            for item in items:
-                if not isinstance(item, dict):
-                    continue
-
-                time_text = get_item_time_text(item)
-
-                if latest_item is None or time_text > latest_time:
-                    latest_item = item
-                    latest_time = time_text
-
-            if latest_item is None:
-                continue
-
-            taiex_value = get_taiex_value(latest_item)
-            tw_result = get_tw_result_from_index(taiex_value)
-
-            if tw_result != "--":
-                info["startDate"] = check_date
-                info["count"] = len(items)
-                info["latestTime"] = latest_time
-                info["latestTAIEX"] = taiex_value
-                info["result"] = tw_result
-                info["error"] = ""
-
-                cached_tw_info = info
-                cached_tw_time = now_time
-
-                return info
-
-            info["error"] = "TAIEX field not found or invalid"
-
-        except Exception as e:
-            info["error"] = str(e)
-
-    return info
-
-
-def get_tw_result():
-    info = get_finmind_tw_latest_info()
-    return info.get("result", "--")
-
-
 def format_time_12h(raw_time):
     if raw_time == "11:00:00":
         return "11:00 AM"
@@ -687,7 +531,6 @@ def build_today_response(live_data):
     live_time = str(live.get("time", "--"))
 
     modern_data = get_modern_internet_for_date(live_date, True)
-    tw_result = get_tw_result()
 
     if modern_data["morningModern"] == "--":
         modern_data["morningModern"] = twod_or_dash(morning_1100)
@@ -740,7 +583,7 @@ def build_today_response(live_data):
 
         "morningModern": modern_data["morningModern"],
         "morningInternet": modern_data["morningInternet"],
-        "morningTW": tw_result,
+        "morningTW": "--",
 
         "eveningModern": modern_data["eveningModern"],
         "eveningInternet": modern_data["eveningInternet"],
@@ -749,10 +592,8 @@ def build_today_response(live_data):
         "serverTime": str(live_data.get("server_time", "--")),
 
         "cached": False,
-        "dataSource": "ThaiStock2D + FinMind API",
+        "dataSource": "ThaiStock2D API - calculated from Thai SET and Value",
         "sourceUrl": THAI_LIVE_URL,
-        "twSourceUrl": FINMIND_API_URL,
-        "twDataset": "TaiwanVariousIndicators5Seconds",
         "timezone": "Myanmar Time UTC+6:30"
     }
 
@@ -768,8 +609,6 @@ def normalize_history(raw_data):
 
     max_days_to_enrich = 20
     day_counter = 0
-
-    tw_result = get_tw_result()
 
     for day in raw_data:
         if not isinstance(day, dict):
@@ -808,26 +647,13 @@ def normalize_history(raw_data):
         modern_data = {
             "morningModern": "--",
             "morningInternet": "--",
-            "morningTW": tw_result,
+            "morningTW": "--",
             "eveningModern": "--",
             "eveningInternet": "--"
         }
 
         if day_counter < max_days_to_enrich:
             modern_data = get_modern_internet_for_date(date_iso, False)
-            modern_data["morningTW"] = tw_result
-
-        if modern_data["morningModern"] == "--":
-            modern_data["morningModern"] = twod_or_dash(item_1100)
-
-        if modern_data["morningInternet"] == "--":
-            modern_data["morningInternet"] = twod_or_dash(item_1201)
-
-        if modern_data["eveningModern"] == "--":
-            modern_data["eveningModern"] = twod_or_dash(item_1500)
-
-        if modern_data["eveningInternet"] == "--":
-            modern_data["eveningInternet"] = twod_or_dash(item_1630)
 
         day_data = {
             "date": date_slash,
@@ -864,7 +690,7 @@ def normalize_history(raw_data):
 
             "morningModern": modern_data["morningModern"],
             "morningInternet": modern_data["morningInternet"],
-            "morningTW": modern_data["morningTW"],
+            "morningTW": "--",
             "eveningModern": modern_data["eveningModern"],
             "eveningInternet": modern_data["eveningInternet"]
         }
@@ -902,7 +728,7 @@ def normalize_history(raw_data):
 
                 "morningModern": modern_data["morningModern"],
                 "morningInternet": modern_data["morningInternet"],
-                "morningTW": modern_data["morningTW"],
+                "morningTW": "--",
                 "eveningModern": modern_data["eveningModern"],
                 "eveningInternet": modern_data["eveningInternet"]
             })
@@ -923,7 +749,7 @@ def convert_day_to_marketdata_style(day):
 
         "modern": day.get("morningModern", "--"),
         "internet": day.get("morningInternet", "--"),
-        "tw": day.get("morningTW", "--"),
+        "tw": "--",
 
         "modern2": day.get("eveningModern", "--"),
         "internet2": day.get("eveningInternet", "--"),
@@ -968,7 +794,8 @@ def build_marketdata_2d_response(month_filter):
         "success": True,
         "status": True,
         "message": "success",
-        "dataSource": "Own Render API - MarketDataMM format imitation",
+        "dataSource": "ThaiStock2D API - Thai SET and Value calculated",
+        "date": month_filter,
         "count": len(data),
         "data": data
     }
@@ -978,14 +805,14 @@ def build_marketdata_2d_response(month_filter):
 def home():
     return jsonify({
         "success": True,
-        "message": "MM 2D 3D API running with ThaiStock2D + FinMind",
+        "message": "MM 2D 3D API running with ThaiStock2D only",
         "today": "/today",
         "history": "/history",
         "statusApi": "/status",
-        "twCheck": "/tw-check",
         "marketData2D": "/api/v3/2d",
         "marketData2DCalendar": "/api/v3/2d-calendar?date=2026-07",
-        "dataSource": "ThaiStock2D + FinMind API"
+        "dataSource": "ThaiStock2D API - calculated from Thai SET and Value",
+        "tw": "disabled"
     })
 
 
@@ -1020,7 +847,7 @@ def today():
         return jsonify({
             "success": False,
             "message": str(e),
-            "dataSource": "ThaiStock2D + FinMind API",
+            "dataSource": "ThaiStock2D API",
             "cached": False
         }), 500
 
@@ -1043,15 +870,14 @@ def history():
 
         response = {
             "success": True,
-            "dataSource": "ThaiStock2D + FinMind API",
+            "dataSource": "ThaiStock2D API - Thai SET and Value calculated",
             "count": len(flat_history),
             "daysCount": len(day_list),
             "history": flat_history,
             "days": day_list,
             "cached": False,
             "sourceUrl": THAI_RESULT_URL,
-            "twSourceUrl": FINMIND_API_URL,
-            "twDataset": "TaiwanVariousIndicators5Seconds"
+            "tw": "disabled"
         }
 
         cached_history = response
@@ -1063,7 +889,7 @@ def history():
         return jsonify({
             "success": False,
             "message": str(e),
-            "dataSource": "ThaiStock2D + FinMind API",
+            "dataSource": "ThaiStock2D API",
             "cached": False
         }), 500
 
@@ -1106,26 +932,6 @@ def api_v3_2d_calendar():
             "date": request.args.get("date", ""),
             "data": []
         }), 500
-
-
-@app.route("/tw-check")
-def tw_check():
-    info = get_finmind_tw_latest_info()
-
-    return jsonify({
-        "success": True,
-        "source": "FinMind",
-        "sourceUrl": FINMIND_API_URL,
-        "dataset": info.get("dataset", "TaiwanVariousIndicators5Seconds"),
-        "startDate": info.get("startDate", "--"),
-        "endDate": info.get("endDate", "none"),
-        "triedDates": info.get("triedDates", []),
-        "count": info.get("count", 0),
-        "latestTime": info.get("latestTime", "--"),
-        "latestTAIEX": info.get("latestTAIEX", "--"),
-        "finalTW": info.get("result", "--"),
-        "error": info.get("error", "")
-    })
 
 
 @app.route("/status")
