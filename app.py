@@ -1,8 +1,6 @@
 from flask import Flask, jsonify
 from datetime import datetime, timedelta
 import time
-import re
-import html
 import os
 import json
 from urllib.request import urlopen, Request
@@ -10,299 +8,35 @@ from urllib.error import HTTPError
 
 app = Flask(__name__)
 
-SET_URL = "https://www.set.or.th/en/home"
-
-RAPIDAPI_KEY = os.environ.get("RAPIDAPI_KEY", "")
-RAPIDAPI_HOST = os.environ.get(
-    "RAPIDAPI_HOST",
-    "myanmar-all-in-one-2d-results.p.rapidapi.com"
+THAI_LIVE_URL = os.environ.get(
+    "THAI_LIVE_URL",
+    "https://api.thaistock2d.com/live"
 )
-RAPIDAPI_HISTORY_URL = os.environ.get(
-    "RAPIDAPI_HISTORY_URL",
-    "https://myanmar-all-in-one-2d-results.p.rapidapi.com/api/v1/daily"
+
+THAI_RESULT_URL = os.environ.get(
+    "THAI_RESULT_URL",
+    "https://api.thaistock2d.com/2d_result"
 )
 
 CACHE_SECONDS = 10
 HISTORY_CACHE_SECONDS = 300
 
 cached_today = None
-cached_time = 0
-last_error = ""
-
+cached_today_time = 0
 cached_history = None
 cached_history_time = 0
-
-daily_store = {
-    "date": "",
-    "morningSet": "--",
-    "morningValue": "--",
-    "morningResult": "--",
-    "morningUpdatedAt": "--",
-    "eveningSet": "--",
-    "eveningValue": "--",
-    "eveningResult": "--",
-    "eveningUpdatedAt": "--"
-}
 
 
 def myanmar_now():
     return datetime.utcnow() + timedelta(hours=6, minutes=30)
 
 
-def reset_daily_store_if_needed():
-    global daily_store
-
-    today = myanmar_now().strftime("%Y-%m-%d")
-
-    if daily_store["date"] != today:
-        daily_store = {
-            "date": today,
-            "morningSet": "--",
-            "morningValue": "--",
-            "morningResult": "--",
-            "morningUpdatedAt": "--",
-            "eveningSet": "--",
-            "eveningValue": "--",
-            "eveningResult": "--",
-            "eveningUpdatedAt": "--"
-        }
-
-
-def clean_text(raw_html):
-    text = re.sub(r"<script[\s\S]*?</script>", " ", raw_html, flags=re.I)
-    text = re.sub(r"<style[\s\S]*?</style>", " ", text, flags=re.I)
-    text = re.sub(r"<[^>]+>", " ", text)
-    text = html.unescape(text)
-    text = re.sub(r"\s+", " ", text)
-    return text.strip()
-
-
-def get_set_decimal_two(price):
-    try:
-        price_float = float(str(price).replace(",", ""))
-        price_text = f"{price_float:.2f}"
-        decimal_part = price_text.split(".")[1]
-        return decimal_part[-2:]
-    except:
-        return "--"
-
-
-def get_value_last_digit(value):
-    text = str(value)
-
-    # decimal မတိုင်ခင် integer part ပဲယူမယ်
-    # Example: 52,662.47 -> 52,662
-    integer_part = text.split(".")[0]
-
-    # comma ဖယ်မယ်
-    # Example: 52,662 -> 52662
-    digits = "".join(ch for ch in integer_part if ch.isdigit())
-
-    if len(digits) == 0:
-        return "0"
-
-    # Example: 52662 -> 2
-    return digits[-1]
-
-
-def get_market_session():
-    now = myanmar_now()
-    current = now.hour * 60 + now.minute
-
-    # Myanmar Time
-    morning_open = 480      # 08:00 AM
-    morning_close = 721     # 12:01 PM
-
-    evening_open = 780      # 01:00 PM
-    evening_close = 991     # 04:31 PM
-
-    status = "CLOSE"
-    session = "none"
-    display_session = "none"
-    next_session = "Morning Session 08:00 AM"
-
-    if current >= morning_open and current <= morning_close:
-        status = "OPEN"
-        session = "morning"
-        display_session = "morning"
-        next_session = "Evening Session 01:00 PM"
-
-    elif current > morning_close and current < evening_open:
-        status = "CLOSE"
-        session = "none"
-        display_session = "morning"
-        next_session = "Evening Session 01:00 PM"
-
-    elif current >= evening_open and current <= evening_close:
-        status = "OPEN"
-        session = "evening"
-        display_session = "evening"
-        next_session = "Tomorrow Morning 08:00 AM"
-
-    elif current > evening_close:
-        status = "CLOSE"
-        session = "none"
-        display_session = "evening"
-        next_session = "Tomorrow Morning 08:00 AM"
-
-    return {
-        "status": status,
-        "session": session,
-        "displaySession": display_session,
-        "nextSession": next_session,
-        "current": current,
-        "time": now.strftime("%H:%M:%S"),
-        "date": now.strftime("%Y-%m-%d")
-    }
-
-
-def fetch_set_official():
+def fetch_json(url):
     request = Request(
-        SET_URL,
+        url,
         headers={
-            "User-Agent": "Mozilla/5.0 MM2D3DInfo/1.0"
-        }
-    )
-
-    with urlopen(request, timeout=20) as response:
-        body = response.read().decode("utf-8", errors="ignore")
-
-    text = clean_text(body)
-
-    market_status = "--"
-    last_update = "--"
-
-    status_match = re.search(r"Market Status\s+([A-Za-z0-9]+)", text)
-    if status_match:
-        market_status = status_match.group(1)
-        market_status = market_status.replace("2", "")
-
-    update_match = re.search(
-        r"Last Update\s+(\d{2}\s+[A-Za-z]{3}\s+\d{4}\s+\d{2}:\d{2}:\d{2})",
-        text
-    )
-    if update_match:
-        last_update = update_match.group(1)
-
-    # Official SET row example:
-    # SET 1,616.34 +5.06 7,205,959 50,797.41
-    set_pattern = r"\bSET\s+([\d,]+\.\d{2})\s+([+-][\d,]+\.\d{2})\s+([\d,]+)\s+([\d,]+\.\d{2})"
-    set_match = re.search(set_pattern, text)
-
-    if not set_match:
-        raise Exception("SET row not found from official SET website")
-
-    set_index = set_match.group(1)
-    change = set_match.group(2)
-    volume = set_match.group(3)
-    trading_value = set_match.group(4)
-
-    return {
-        "setIndex": set_index,
-        "change": change,
-        "volume": volume,
-        "tradingValue": trading_value,
-        "marketStatusFromSET": market_status,
-        "lastUpdateFromSET": last_update
-    }
-
-
-def build_result_data(set_data):
-    global daily_store
-
-    reset_daily_store_if_needed()
-
-    now = myanmar_now()
-    session_info = get_market_session()
-
-    set_index = set_data["setIndex"]
-    trading_value = set_data["tradingValue"]
-
-    # SET Index 1342.56 -> decimal two = 56 -> last digit = 6
-    set_decimal_two = get_set_decimal_two(set_index)
-
-    if set_decimal_two == "--":
-        set_last_digit = "0"
-    else:
-        set_last_digit = set_decimal_two[-1]
-
-    # Market Turnover 52,662.47 -> integer 52662 -> last digit = 2
-    value_last_digit = get_value_last_digit(trading_value)
-
-    # Correct 2D formula
-    # SET decimal last digit + Market turnover last digit
-    result_2d = set_last_digit + value_last_digit
-
-    updated_at = now.strftime("%Y-%m-%d %H:%M:%S")
-    display_session = session_info["displaySession"]
-
-    # 12:00 PM row
-    if display_session == "morning":
-        daily_store["morningSet"] = str(set_index)
-        daily_store["morningValue"] = str(trading_value)
-        daily_store["morningResult"] = result_2d
-        daily_store["morningUpdatedAt"] = updated_at
-
-    # 4:30 PM row
-    elif display_session == "evening":
-        daily_store["eveningSet"] = str(set_index)
-        daily_store["eveningValue"] = str(trading_value)
-        daily_store["eveningResult"] = result_2d
-        daily_store["eveningUpdatedAt"] = updated_at
-
-    return {
-        "success": True,
-        "date": now.strftime("%Y-%m-%d"),
-        "symbol": "SET Official",
-
-        "status": session_info["status"],
-        "session": session_info["session"],
-        "displaySession": session_info["displaySession"],
-        "nextSession": session_info["nextSession"],
-
-        "set": str(set_index),
-        "value": str(trading_value),
-        "volume": str(set_data["volume"]),
-
-        "setDecimalTwo": set_decimal_two,
-        "setLastDigit": set_last_digit,
-        "valueLastDigit": value_last_digit,
-
-        "result2d": result_2d,
-
-        "morningSet": daily_store["morningSet"],
-        "morningValue": daily_store["morningValue"],
-        "morningResult": daily_store["morningResult"],
-        "morningUpdatedAt": daily_store["morningUpdatedAt"],
-
-        "eveningSet": daily_store["eveningSet"],
-        "eveningValue": daily_store["eveningValue"],
-        "eveningResult": daily_store["eveningResult"],
-        "eveningUpdatedAt": daily_store["eveningUpdatedAt"],
-
-        "updatedAt": updated_at,
-        "setLastUpdate": set_data["lastUpdateFromSET"],
-        "setMarketStatus": set_data["marketStatusFromSET"],
-
-        "cached": False,
-        "dataSource": "SET Official Website",
-        "timezone": "Myanmar Time UTC+6:30",
-
-        "change": set_data["change"],
-        "sourceUrl": SET_URL
-    }
-
-
-def fetch_rapidapi_history():
-    if RAPIDAPI_KEY == "":
-        raise Exception("RAPIDAPI_KEY is missing in Render Environment")
-
-    request = Request(
-        RAPIDAPI_HISTORY_URL,
-        headers={
-            "Content-Type": "application/json",
-            "x-rapidapi-host": RAPIDAPI_HOST,
-            "x-rapidapi-key": RAPIDAPI_KEY
+            "User-Agent": "MM2D3DInfo/1.0",
+            "Accept": "application/json"
         }
     )
 
@@ -316,119 +50,360 @@ def fetch_rapidapi_history():
         raise Exception(body)
 
 
-def normalize_history(raw_data):
-    items = []
+def get_market_session():
+    now = myanmar_now()
+    current = now.hour * 60 + now.minute
 
-    # /api/v1/daily response structure:
-    # {
-    #   "status": 200,
-    #   "condition": "🚀",
-    #   "data": {
-    #       "dailyTwoD": [...]
-    #   }
-    # }
-    if isinstance(raw_data, dict):
-        data = raw_data.get("data")
+    morning_open = 570      # 09:30 AM
+    morning_close = 721     # 12:01 PM
 
-        if isinstance(data, dict):
-            if "dailyTwoD" in data:
-                items = data.get("dailyTwoD", [])
+    evening_open = 840      # 02:00 PM
+    evening_close = 990     # 04:30 PM
 
-        elif isinstance(data, list):
-            items = data
+    status = "CLOSE"
+    session = "none"
+    display_session = "none"
+    next_session = "Morning Session 09:30 AM"
 
-        elif "twoDCalendar" in raw_data:
-            items = raw_data.get("twoDCalendar", [])
+    if current >= morning_open and current <= morning_close:
+        status = "OPEN"
+        session = "morning"
+        display_session = "morning"
+        next_session = "Evening Session 02:00 PM"
 
-        elif "dailyTwoD" in raw_data:
-            items = raw_data.get("dailyTwoD", [])
+    elif current > morning_close and current < evening_open:
+        status = "CLOSE"
+        session = "none"
+        display_session = "morning"
+        next_session = "Evening Session 02:00 PM"
 
-    elif isinstance(raw_data, list):
-        items = raw_data
+    elif current >= evening_open and current <= evening_close:
+        status = "OPEN"
+        session = "evening"
+        display_session = "evening"
+        next_session = "Tomorrow Morning 09:30 AM"
 
-    history = []
-    seen = set()
+    elif current > evening_close:
+        status = "CLOSE"
+        session = "none"
+        display_session = "evening"
+        next_session = "Tomorrow Morning 09:30 AM"
 
-    for item in items:
+    return {
+        "status": status,
+        "session": session,
+        "displaySession": display_session,
+        "nextSession": next_session,
+        "current": current,
+        "time": now.strftime("%H:%M:%S"),
+        "date": now.strftime("%Y-%m-%d")
+    }
+
+
+def find_by_time(result_list, open_time):
+    if not isinstance(result_list, list):
+        return None
+
+    for item in result_list:
         if not isinstance(item, dict):
             continue
 
-        date = str(item.get("date", "--"))
-        time_value = str(item.get("time", "--"))
-        result = str(item.get("result", "--"))
-        set_value = str(item.get("set", "--"))
-        market_value = str(item.get("value", "--"))
+        item_time = str(item.get("open_time", item.get("time", "")))
 
-        # Duplicate data ဖယ်မယ်
-        unique_key = date + "|" + time_value + "|" + result + "|" + set_value + "|" + market_value
+        if item_time == open_time:
+            return item
 
-        if unique_key in seen:
+    return None
+
+
+def value_or_dash(item, key):
+    if item is None:
+        return "--"
+
+    value = item.get(key, "--")
+
+    if value is None or str(value).strip() == "":
+        return "--"
+
+    return str(value)
+
+
+def twod_or_dash(item):
+    if item is None:
+        return "--"
+
+    value = item.get("twod", item.get("result", "--"))
+
+    if value is None or str(value).strip() == "":
+        return "--"
+
+    return str(value)
+
+
+def format_time_12h(raw_time):
+    if raw_time == "11:00:00":
+        return "11:00 AM"
+
+    if raw_time == "12:01:00":
+        return "12:01 PM"
+
+    if raw_time == "15:00:00":
+        return "03:00 PM"
+
+    if raw_time == "16:30:00":
+        return "04:30 PM"
+
+    try:
+        dt = datetime.strptime(raw_time, "%H:%M:%S")
+        return dt.strftime("%I:%M %p")
+    except:
+        return str(raw_time)
+
+
+def format_date_slash(date_text):
+    try:
+        dt = datetime.strptime(date_text, "%Y-%m-%d")
+        return dt.strftime("%d/%m/%Y")
+    except:
+        return str(date_text)
+
+
+def format_date_title(date_text):
+    try:
+        dt = datetime.strptime(date_text, "%Y-%m-%d")
+        return dt.strftime("%B %-d, %Y (%A)")
+    except:
+        try:
+            dt = datetime.strptime(date_text, "%Y-%m-%d")
+            return dt.strftime("%B %d, %Y (%A)").replace(" 0", " ")
+        except:
+            return str(date_text)
+
+
+def build_today_response(raw_data):
+    session_info = get_market_session()
+
+    live = raw_data.get("live", {})
+    result_list = raw_data.get("result", [])
+
+    morning_1100 = find_by_time(result_list, "11:00:00")
+    morning_1201 = find_by_time(result_list, "12:01:00")
+    evening_1500 = find_by_time(result_list, "15:00:00")
+    evening_1630 = find_by_time(result_list, "16:30:00")
+
+    live_set = value_or_dash(live, "set")
+    live_value = value_or_dash(live, "value")
+    live_twod = twod_or_dash(live)
+
+    live_date = str(live.get("date", session_info["date"]))
+    live_time = str(live.get("time", "--"))
+
+    return {
+        "success": True,
+
+        "date": live_date,
+        "symbol": "ThaiStock2D",
+
+        "status": session_info["status"],
+        "session": session_info["session"],
+        "displaySession": session_info["displaySession"],
+        "nextSession": session_info["nextSession"],
+
+        "set": live_set,
+        "value": live_value,
+        "result2d": live_twod,
+
+        "morningOpenTime": "11:00 AM",
+        "morningOpenSet": value_or_dash(morning_1100, "set"),
+        "morningOpenValue": value_or_dash(morning_1100, "value"),
+        "morningOpenResult": twod_or_dash(morning_1100),
+
+        "morningTime": "12:01 PM",
+        "morningSet": value_or_dash(morning_1201, "set"),
+        "morningValue": value_or_dash(morning_1201, "value"),
+        "morningResult": twod_or_dash(morning_1201),
+        "morningUpdatedAt": str(morning_1201.get("stock_datetime", "--")) if morning_1201 else "--",
+
+        "eveningOpenTime": "03:00 PM",
+        "eveningOpenSet": value_or_dash(evening_1500, "set"),
+        "eveningOpenValue": value_or_dash(evening_1500, "value"),
+        "eveningOpenResult": twod_or_dash(evening_1500),
+
+        "eveningTime": "04:30 PM",
+        "eveningSet": value_or_dash(evening_1630, "set"),
+        "eveningValue": value_or_dash(evening_1630, "value"),
+        "eveningResult": twod_or_dash(evening_1630),
+        "eveningUpdatedAt": str(evening_1630.get("stock_datetime", "--")) if evening_1630 else "--",
+
+        "updatedAt": live_time,
+        "serverTime": str(raw_data.get("server_time", "--")),
+
+        "holiday": raw_data.get("holiday", {}),
+        "cached": False,
+        "dataSource": "ThaiStock2D API",
+        "sourceUrl": THAI_LIVE_URL,
+        "timezone": "Myanmar Time UTC+6:30"
+    }
+
+
+def normalize_history(raw_data):
+    flat_history = []
+    day_list = []
+
+    if not isinstance(raw_data, list):
+        return flat_history, day_list
+
+    seen = set()
+
+    for day in raw_data:
+        if not isinstance(day, dict):
             continue
 
-        seen.add(unique_key)
+        date_iso = str(day.get("date", "--"))
+        date_slash = format_date_slash(date_iso)
+        date_title = format_date_title(date_iso)
 
-        history.append({
-            "date": date,
-            "time": time_value,
-            "result": result,
-            "set": set_value,
-            "value": market_value
-        })
+        child = day.get("child", [])
 
-    return history
+        item_1100 = None
+        item_1201 = None
+        item_1500 = None
+        item_1630 = None
+
+        if isinstance(child, list):
+            for item in child:
+                if not isinstance(item, dict):
+                    continue
+
+                item_time = str(item.get("time", "--"))
+
+                if item_time == "11:00:00":
+                    item_1100 = item
+
+                elif item_time == "12:01:00":
+                    item_1201 = item
+
+                elif item_time == "15:00:00":
+                    item_1500 = item
+
+                elif item_time == "16:30:00":
+                    item_1630 = item
+
+        day_data = {
+            "date": date_slash,
+            "dateIso": date_iso,
+            "dateTitle": date_title,
+
+            "morningOpen": {
+                "time": "11:00 AM",
+                "set": value_or_dash(item_1100, "set"),
+                "value": value_or_dash(item_1100, "value"),
+                "result": twod_or_dash(item_1100)
+            },
+
+            "morning": {
+                "time": "12:01 PM",
+                "set": value_or_dash(item_1201, "set"),
+                "value": value_or_dash(item_1201, "value"),
+                "result": twod_or_dash(item_1201)
+            },
+
+            "eveningOpen": {
+                "time": "03:00 PM",
+                "set": value_or_dash(item_1500, "set"),
+                "value": value_or_dash(item_1500, "value"),
+                "result": twod_or_dash(item_1500)
+            },
+
+            "evening": {
+                "time": "04:30 PM",
+                "set": value_or_dash(item_1630, "set"),
+                "value": value_or_dash(item_1630, "value"),
+                "result": twod_or_dash(item_1630)
+            }
+        }
+
+        day_list.append(day_data)
+
+        # Old Android HistoryActivity အတွက် flat list ပြန်ပေးမယ်
+        for item in [item_1201, item_1630]:
+            if item is None:
+                continue
+
+            raw_time = str(item.get("time", "--"))
+            time_text = format_time_12h(raw_time)
+            result = twod_or_dash(item)
+            set_value = value_or_dash(item, "set")
+            market_value = value_or_dash(item, "value")
+
+            unique_key = date_slash + "|" + time_text + "|" + result + "|" + set_value + "|" + market_value
+
+            if unique_key in seen:
+                continue
+
+            seen.add(unique_key)
+
+            flat_history.append({
+                "date": date_slash,
+                "dateIso": date_iso,
+                "dateTitle": date_title,
+                "time": time_text,
+                "rawTime": raw_time,
+                "result": result,
+                "twod": result,
+                "set": set_value,
+                "value": market_value
+            })
+
+    return flat_history, day_list
 
 
 @app.route("/")
 def home():
     return jsonify({
         "success": True,
-        "message": "MM 2D 3D API running",
+        "message": "MM 2D 3D API running with ThaiStock2D",
         "today": "/today",
         "history": "/history",
         "statusApi": "/status",
-        "source": SET_URL
+        "dataSource": "ThaiStock2D API"
     })
 
 
 @app.route("/today")
 def today():
     global cached_today
-    global cached_time
-    global last_error
+    global cached_today_time
 
     now_time = time.time()
 
-    if cached_today is not None and now_time - cached_time < CACHE_SECONDS:
+    if cached_today is not None and now_time - cached_today_time < CACHE_SECONDS:
         response = dict(cached_today)
         response["cached"] = True
-        response["lastError"] = last_error
         return jsonify(response)
 
     try:
-        set_data = fetch_set_official()
-        fresh_data = build_result_data(set_data)
+        raw_data = fetch_json(THAI_LIVE_URL)
+        response = build_today_response(raw_data)
 
-        cached_today = fresh_data
-        cached_time = now_time
-        last_error = ""
+        cached_today = response
+        cached_today_time = now_time
 
-        return jsonify(fresh_data)
+        return jsonify(response)
 
     except Exception as e:
-        last_error = str(e)
-
         if cached_today is not None:
             response = dict(cached_today)
             response["cached"] = True
-            response["lastError"] = last_error
+            response["lastError"] = str(e)
             return jsonify(response)
 
         return jsonify({
             "success": False,
-            "message": last_error,
-            "dataSource": "SET Official Website",
+            "message": str(e),
+            "dataSource": "ThaiStock2D API",
             "cached": False
-        }), 429
+        }), 500
 
 
 @app.route("/history")
@@ -444,15 +419,18 @@ def history():
         return jsonify(response)
 
     try:
-        raw_data = fetch_rapidapi_history()
-        history_data = normalize_history(raw_data)
+        raw_data = fetch_json(THAI_RESULT_URL)
+        flat_history, day_list = normalize_history(raw_data)
 
         response = {
             "success": True,
-            "dataSource": "RapidAPI Myanmar All In One 2D Results",
-            "count": len(history_data),
-            "history": history_data,
-            "cached": False
+            "dataSource": "ThaiStock2D API",
+            "count": len(flat_history),
+            "daysCount": len(day_list),
+            "history": flat_history,
+            "days": day_list,
+            "cached": False,
+            "sourceUrl": THAI_RESULT_URL
         }
 
         cached_history = response
@@ -464,7 +442,8 @@ def history():
         return jsonify({
             "success": False,
             "message": str(e),
-            "dataSource": "RapidAPI Myanmar All In One 2D Results"
+            "dataSource": "ThaiStock2D API",
+            "cached": False
         }), 500
 
 
