@@ -4,6 +4,8 @@ import time
 import os
 import json
 import ssl
+import gzip
+import zlib
 from urllib.request import urlopen, Request
 from urllib.error import HTTPError
 
@@ -56,21 +58,40 @@ def fetch_json(url):
     request = Request(
         url,
         headers={
-            "User-Agent": "Mozilla/5.0 MM2D3DInfo/1.0",
-            "Accept": "application/json,text/plain,*/*"
+            "User-Agent": "Mozilla/5.0 (Android) MM2D3DInfo/1.0",
+            "Accept": "application/json,text/plain,*/*",
+            "Accept-Encoding": "gzip, deflate, identity",
+            "Connection": "close"
         }
     )
 
     try:
         ssl_context = None
 
-        # Render server မှာ TWSE SSL certificate verify error တက်နိုင်လို့
-        # openapi.twse.com.tw အတွက်ပဲ SSL verify bypass လုပ်ထားတာပါ
         if "openapi.twse.com.tw" in url:
             ssl_context = ssl._create_unverified_context()
 
         with urlopen(request, timeout=30, context=ssl_context) as response:
-            body = response.read().decode("utf-8", errors="ignore")
+            raw_body = response.read()
+            encoding = str(response.headers.get("Content-Encoding", "")).lower()
+
+            if "gzip" in encoding:
+                raw_body = gzip.decompress(raw_body)
+
+            elif "deflate" in encoding:
+                try:
+                    raw_body = zlib.decompress(raw_body)
+                except:
+                    raw_body = zlib.decompress(raw_body, -zlib.MAX_WBITS)
+
+            body = raw_body.decode("utf-8-sig", errors="replace").strip()
+
+            if body == "":
+                raise Exception("Empty response from " + url)
+
+            if not body.startswith("{") and not body.startswith("["):
+                raise Exception("Non JSON response from " + url + " => " + body[:200])
+
             return json.loads(body)
 
     except HTTPError as e:
@@ -82,11 +103,11 @@ def get_market_session():
     now = myanmar_now()
     current = now.hour * 60 + now.minute
 
-    morning_open = 570      # 09:30 AM
-    morning_close = 721     # 12:01 PM
+    morning_open = 570
+    morning_close = 721
 
-    evening_open = 840      # 02:00 PM
-    evening_close = 990     # 04:30 PM
+    evening_open = 840
+    evening_close = 990
 
     status = "CLOSE"
     session = "none"
