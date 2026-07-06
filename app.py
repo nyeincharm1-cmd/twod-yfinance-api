@@ -23,6 +23,11 @@ THAI_HISTORY_URL = os.environ.get(
     "https://api.thaistock2d.com/history"
 )
 
+TWSE_INDEX_URL = os.environ.get(
+    "TWSE_INDEX_URL",
+    "https://openapi.twse.com.tw/v1/indicesReport/MI_5MINS_HIST"
+)
+
 CACHE_SECONDS = 10
 HISTORY_CACHE_SECONDS = 300
 
@@ -31,6 +36,10 @@ cached_today_time = 0
 
 cached_history = None
 cached_history_time = 0
+
+cached_tw_result = None
+cached_tw_time = 0
+TW_CACHE_SECONDS = 300
 
 
 def myanmar_now():
@@ -60,12 +69,11 @@ def get_market_session():
     now = myanmar_now()
     current = now.hour * 60 + now.minute
 
-    # Myanmar local time: 9:30 AM ~ 12:01 PM and 2:00 PM ~ 4:30 PM
-    morning_open = 570
-    morning_close = 721
+    morning_open = 570      # 09:30 AM
+    morning_close = 721     # 12:01 PM
 
-    evening_open = 840
-    evening_close = 990
+    evening_open = 840      # 02:00 PM
+    evening_close = 990     # 04:30 PM
 
     status = "CLOSE"
     session = "none"
@@ -128,7 +136,12 @@ def twod_or_dash(item):
     if value is None or str(value).strip() == "":
         return "--"
 
-    return str(value)
+    text = str(value).strip()
+
+    if len(text) == 1:
+        return "0" + text
+
+    return text[-2:]
 
 
 def find_by_time(result_list, open_time):
@@ -151,19 +164,18 @@ def time_to_seconds(time_text):
     try:
         time_text = str(time_text).strip()
 
-        # Example: 09:30:02
-        if ":" in time_text:
-            parts = time_text.split(":")
-            hour = int(parts[0])
-            minute = int(parts[1])
-            second = 0
+        if ":" not in time_text:
+            return -1
 
-            if len(parts) >= 3:
-                second = int(parts[2])
+        parts = time_text.split(":")
+        hour = int(parts[0])
+        minute = int(parts[1])
+        second = 0
 
-            return hour * 3600 + minute * 60 + second
+        if len(parts) >= 3:
+            second = int(parts[2])
 
-        return -1
+        return hour * 3600 + minute * 60 + second
 
     except:
         return -1
@@ -173,7 +185,6 @@ def extract_time(item):
     if not isinstance(item, dict):
         return ""
 
-    # ThaiStock2D history can return time / stock_time / open_time / stock_datetime
     if item.get("time"):
         return str(item.get("time"))
 
@@ -217,10 +228,6 @@ def extract_twod(item):
 
 
 def normalize_history_change_items(raw_data):
-    """
-    /history or /history?date=YYYY-MM-DD response structure မတူနိုင်လို့
-    list ဖြစ်အောင် normalize လုပ်ထားတာ။
-    """
     if isinstance(raw_data, list):
         return raw_data
 
@@ -252,10 +259,6 @@ def normalize_history_change_items(raw_data):
 
 
 def fetch_change_history_for_date(date_iso):
-    """
-    အရင် /history?date=YYYY-MM-DD နဲ့စမ်းမယ်။
-    မရရင် /history base endpoint ကို fallback သုံးမယ်။
-    """
     try:
         date_url = THAI_HISTORY_URL + "?date=" + date_iso
         data = fetch_json(date_url)
@@ -346,18 +349,6 @@ def find_second_different_twod_between(items, start_time, end_time, first_twod):
 
 
 def get_modern_internet_for_date(date_iso):
-    """
-    History card တစ်ရက်ချင်းအတွက် Modern / Internet ကို
-    stock change history မှယူမယ်။
-
-    9:30 AM panel:
-      Modern = 09:30-10:59 ထဲက first twod
-      Internet = first နဲ့မတူတဲ့ next twod
-
-    2:00 PM panel:
-      Modern = 14:00-14:59 ထဲက first twod
-      Internet = first နဲ့မတူတဲ့ next twod
-    """
     items = fetch_change_history_for_date(date_iso)
 
     morning_modern = find_first_twod_between(
@@ -393,6 +384,86 @@ def get_modern_internet_for_date(date_iso):
         "eveningModern": evening_modern,
         "eveningInternet": evening_internet
     }
+
+
+def get_tw_result_from_closing_index(closing_index):
+    try:
+        text = str(closing_index).replace(",", "").strip()
+
+        if text == "" or text == "--":
+            return "--"
+
+        if "." in text:
+            decimal_part = text.split(".")[1]
+
+            if len(decimal_part) >= 2:
+                return decimal_part[:2]
+
+            if len(decimal_part) == 1:
+                return decimal_part + "0"
+
+        digits = "".join(ch for ch in text if ch.isdigit())
+
+        if len(digits) >= 2:
+            return digits[-2:]
+
+        return "--"
+
+    except:
+        return "--"
+
+
+def get_twse_latest_result():
+    global cached_tw_result
+    global cached_tw_time
+
+    now_time = time.time()
+
+    if cached_tw_result is not None and now_time - cached_tw_time < TW_CACHE_SECONDS:
+        return cached_tw_result
+
+    try:
+        data = fetch_json(TWSE_INDEX_URL)
+
+        if not isinstance(data, list) or len(data) == 0:
+            cached_tw_result = "--"
+            cached_tw_time = now_time
+            return "--"
+
+        latest_item = None
+        latest_date = ""
+
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+
+            date_text = str(item.get("Date", item.get("日期", "")))
+
+            if latest_item is None or date_text > latest_date:
+                latest_item = item
+                latest_date = date_text
+
+        if latest_item is None:
+            cached_tw_result = "--"
+            cached_tw_time = now_time
+            return "--"
+
+        closing_index = latest_item.get(
+            "ClosingIndex",
+            latest_item.get("收盤指數", "--")
+        )
+
+        result = get_tw_result_from_closing_index(closing_index)
+
+        cached_tw_result = result
+        cached_tw_time = now_time
+
+        return result
+
+    except:
+        cached_tw_result = "--"
+        cached_tw_time = now_time
+        return "--"
 
 
 def format_time_12h(raw_time):
@@ -450,8 +521,8 @@ def build_today_response(live_data):
     live_time = str(live.get("time", "--"))
 
     modern_data = get_modern_internet_for_date(live_date)
+    tw_result = get_twse_latest_result()
 
-    # fallback: current day /history မရရင် fixed result ကို fallback
     if modern_data["morningModern"] == "--":
         modern_data["morningModern"] = twod_or_dash(morning_1100)
 
@@ -503,7 +574,7 @@ def build_today_response(live_data):
 
         "morningModern": modern_data["morningModern"],
         "morningInternet": modern_data["morningInternet"],
-        "morningTW": modern_data["morningTW"],
+        "morningTW": tw_result,
 
         "eveningModern": modern_data["eveningModern"],
         "eveningInternet": modern_data["eveningInternet"],
@@ -512,8 +583,9 @@ def build_today_response(live_data):
         "serverTime": str(live_data.get("server_time", "--")),
 
         "cached": False,
-        "dataSource": "ThaiStock2D API",
+        "dataSource": "ThaiStock2D + TWSE API",
         "sourceUrl": THAI_LIVE_URL,
+        "twSourceUrl": TWSE_INDEX_URL,
         "timezone": "Myanmar Time UTC+6:30"
     }
 
@@ -527,9 +599,10 @@ def normalize_history(raw_data):
 
     seen = set()
 
-    # Render timeout မဖြစ်အောင် history days 20 ရက်အထိပဲ enrich လုပ်မယ်
     max_days_to_enrich = 20
     day_counter = 0
+
+    tw_result = get_twse_latest_result()
 
     for day in raw_data:
         if not isinstance(day, dict):
@@ -568,16 +641,14 @@ def normalize_history(raw_data):
         modern_data = {
             "morningModern": "--",
             "morningInternet": "--",
-            "morningTW": "--",
+            "morningTW": tw_result,
             "eveningModern": "--",
             "eveningInternet": "--"
         }
 
         if day_counter < max_days_to_enrich:
             modern_data = get_modern_internet_for_date(date_iso)
-
-        # fallback မလုပ်တော့ဘူး — မှားတဲ့ Modern / Internet မပြချင်လို့
-        # history?date မရရင် -- ပဲထားမယ်
+            modern_data["morningTW"] = tw_result
 
         day_data = {
             "date": date_slash,
@@ -664,11 +735,11 @@ def normalize_history(raw_data):
 def home():
     return jsonify({
         "success": True,
-        "message": "MM 2D 3D API running with ThaiStock2D",
+        "message": "MM 2D 3D API running with ThaiStock2D + TWSE",
         "today": "/today",
         "history": "/history",
         "statusApi": "/status",
-        "dataSource": "ThaiStock2D API"
+        "dataSource": "ThaiStock2D + TWSE API"
     })
 
 
@@ -703,7 +774,7 @@ def today():
         return jsonify({
             "success": False,
             "message": str(e),
-            "dataSource": "ThaiStock2D API",
+            "dataSource": "ThaiStock2D + TWSE API",
             "cached": False
         }), 500
 
@@ -726,13 +797,14 @@ def history():
 
         response = {
             "success": True,
-            "dataSource": "ThaiStock2D API",
+            "dataSource": "ThaiStock2D + TWSE API",
             "count": len(flat_history),
             "daysCount": len(day_list),
             "history": flat_history,
             "days": day_list,
             "cached": False,
-            "sourceUrl": THAI_RESULT_URL
+            "sourceUrl": THAI_RESULT_URL,
+            "twSourceUrl": TWSE_INDEX_URL
         }
 
         cached_history = response
@@ -744,7 +816,7 @@ def history():
         return jsonify({
             "success": False,
             "message": str(e),
-            "dataSource": "ThaiStock2D API",
+            "dataSource": "ThaiStock2D + TWSE API",
             "cached": False
         }), 500
 
