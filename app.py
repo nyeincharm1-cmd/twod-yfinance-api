@@ -39,22 +39,22 @@ def get_set_decimal_two(price):
         return "--"
 
 
-def get_value_last_two_digits(value):
+def get_value_last_digit(value):
     text = str(value)
 
     # decimal မတိုင်ခင် integer part ပဲယူမယ်
+    # Example: 52,662.47 -> 52,662
     integer_part = text.split(".")[0]
 
     # comma ဖယ်မယ်
+    # Example: 52,662 -> 52662
     digits = "".join(ch for ch in integer_part if ch.isdigit())
 
-    if len(digits) >= 2:
-        return digits[-2:]
+    if len(digits) == 0:
+        return "0"
 
-    if len(digits) == 1:
-        return "0" + digits
-
-    return "00"
+    # Example: 52662 -> 2
+    return digits[-1]
 
 
 def get_market_session():
@@ -136,7 +136,7 @@ def fetch_set_official():
     if update_match:
         last_update = update_match.group(1)
 
-    # Official SET page row example:
+    # Official SET row example:
     # SET 1,616.34 +5.06 7,205,959 50,797.41
     set_pattern = r"\bSET\s+([\d,]+\.\d{2})\s+([+-][\d,]+\.\d{2})\s+([\d,]+)\s+([\d,]+\.\d{2})"
     set_match = re.search(set_pattern, text)
@@ -166,8 +166,7 @@ def build_result_data(set_data):
     set_index = set_data["setIndex"]
     trading_value = set_data["tradingValue"]
 
-    # SET Index decimal two
-    # Example: 1,614.09 -> 09
+    # SET Index 1342.56 -> decimal two = 56 -> last digit = 6
     set_decimal_two = get_set_decimal_two(set_index)
 
     if set_decimal_two == "--":
@@ -175,11 +174,13 @@ def build_result_data(set_data):
     else:
         set_last_digit = set_decimal_two[-1]
 
-    # New rule:
-    # Value 52,662.47 -> 52662 -> last 2 digits = 62
-    value_last_two_digits = get_value_last_two_digits(trading_value)
+    # Market Turnover 52,662.47 -> integer 52662 -> last digit = 2
+    value_last_digit = get_value_last_digit(trading_value)
 
-    result_2d = value_last_two_digits
+    # Correct 2D formula:
+    # SET last digit + Market Turnover last digit
+    # Example: 6 + 0 = 60
+    result_2d = set_last_digit + value_last_digit
 
     display_session = session_info["displaySession"]
 
@@ -210,9 +211,7 @@ def build_result_data(set_data):
 
         "setDecimalTwo": set_decimal_two,
         "setLastDigit": set_last_digit,
-
-        "valueLastDigit": value_last_two_digits[-1],
-        "valueLastTwoDigits": value_last_two_digits,
+        "valueLastDigit": value_last_digit,
 
         "result2d": result_2d,
         "morningResult": morning_result,
@@ -235,7 +234,7 @@ def build_result_data(set_data):
 def home():
     return jsonify({
         "success": True,
-        "message": "SET Official Website API running",
+        "message": "SET Official Website API running with correct 2D formula",
         "source": SET_URL
     })
 
