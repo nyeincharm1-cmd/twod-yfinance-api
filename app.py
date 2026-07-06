@@ -1,4 +1,4 @@
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 from datetime import datetime, timedelta
 import time
 import os
@@ -60,7 +60,7 @@ def taiwan_now():
 
 
 def fetch_json(url):
-    request = Request(
+    request_obj = Request(
         url,
         headers={
             "User-Agent": "Mozilla/5.0 (Android) MM2D3DInfo/1.0",
@@ -76,7 +76,7 @@ def fetch_json(url):
         if "openapi.twse.com.tw" in url:
             ssl_context = ssl._create_unverified_context()
 
-        with urlopen(request, timeout=30, context=ssl_context) as response:
+        with urlopen(request_obj, timeout=30, context=ssl_context) as response:
             raw_body = response.read()
             encoding = str(response.headers.get("Content-Encoding", "")).lower()
 
@@ -817,7 +817,6 @@ def normalize_history(raw_data):
             modern_data = get_modern_internet_for_date(date_iso, False)
             modern_data["morningTW"] = tw_result
 
-        # History raw 9:30 / 2:00 data မရရင် final result နဲ့ fallback ပြမယ်
         if modern_data["morningModern"] == "--":
             modern_data["morningModern"] = twod_or_dash(item_1100)
 
@@ -911,6 +910,70 @@ def normalize_history(raw_data):
     return flat_history, day_list
 
 
+def convert_day_to_marketdata_style(day):
+    morning_open = day.get("morningOpen", {})
+    morning = day.get("morning", {})
+    evening_open = day.get("eveningOpen", {})
+    evening = day.get("evening", {})
+
+    return {
+        "date": day.get("dateIso", "--"),
+        "dateText": day.get("date", "--"),
+        "dateTitle": day.get("dateTitle", "--"),
+
+        "modern": day.get("morningModern", "--"),
+        "internet": day.get("morningInternet", "--"),
+        "tw": day.get("morningTW", "--"),
+
+        "modern2": day.get("eveningModern", "--"),
+        "internet2": day.get("eveningInternet", "--"),
+
+        "set": morning.get("set", "--"),
+        "val": morning.get("value", "--"),
+        "twoD": morning.get("result", "--"),
+
+        "morningOpenSet": morning_open.get("set", "--"),
+        "morningOpenValue": morning_open.get("value", "--"),
+        "morningOpenResult": morning_open.get("result", "--"),
+
+        "morningSet": morning.get("set", "--"),
+        "morningValue": morning.get("value", "--"),
+        "morningResult": morning.get("result", "--"),
+
+        "eveningOpenSet": evening_open.get("set", "--"),
+        "eveningOpenValue": evening_open.get("value", "--"),
+        "eveningOpenResult": evening_open.get("result", "--"),
+
+        "eveningSet": evening.get("set", "--"),
+        "eveningValue": evening.get("value", "--"),
+        "eveningResult": evening.get("result", "--")
+    }
+
+
+def build_marketdata_2d_response(month_filter):
+    raw_data = fetch_json(THAI_RESULT_URL)
+    flat_history, day_list = normalize_history(raw_data)
+
+    data = []
+
+    for day in day_list:
+        date_iso = str(day.get("dateIso", ""))
+
+        if month_filter != "" and not date_iso.startswith(month_filter):
+            continue
+
+        data.append(convert_day_to_marketdata_style(day))
+
+    return {
+        "success": True,
+        "status": True,
+        "message": "success",
+        "dataSource": "Own Render API - MarketDataMM format imitation",
+        "count": len(data),
+        "data": data
+    }
+
+
 @app.route("/")
 def home():
     return jsonify({
@@ -920,6 +983,8 @@ def home():
         "history": "/history",
         "statusApi": "/status",
         "twCheck": "/tw-check",
+        "marketData2D": "/api/v3/2d",
+        "marketData2DCalendar": "/api/v3/2d-calendar?date=2026-07",
         "dataSource": "ThaiStock2D + FinMind API"
     })
 
@@ -1000,6 +1065,46 @@ def history():
             "message": str(e),
             "dataSource": "ThaiStock2D + FinMind API",
             "cached": False
+        }), 500
+
+
+@app.route("/api/v3/2d")
+def api_v3_2d():
+    try:
+        response = build_marketdata_2d_response("")
+        return jsonify(response)
+
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "status": False,
+            "message": str(e),
+            "data": []
+        }), 500
+
+
+@app.route("/api/v3/2d-calendar")
+def api_v3_2d_calendar():
+    try:
+        month_filter = request.args.get("date", "")
+
+        if month_filter is None or str(month_filter).strip() == "":
+            month_filter = myanmar_now().strftime("%Y-%m")
+
+        month_filter = str(month_filter).strip()
+
+        response = build_marketdata_2d_response(month_filter)
+        response["date"] = month_filter
+
+        return jsonify(response)
+
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "status": False,
+            "message": str(e),
+            "date": request.args.get("date", ""),
+            "data": []
         }), 500
 
 
