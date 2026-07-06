@@ -1,20 +1,14 @@
 from flask import Flask, jsonify
 from datetime import datetime, timedelta
 import time
-import json
+import re
+import html
 from urllib.request import urlopen, Request
-from urllib.parse import urlencode
-from urllib.error import HTTPError
 
 app = Flask(__name__)
 
-# API key တခါထဲထည့်ထားတဲ့ version
-TWELVE_DATA_API_KEY = "4e63156501494425a166daf42bd1f88e"
+SET_URL = "https://www.set.or.th/en/home"
 
-QUOTE_URL = "https://api.twelvedata.com/quote"
-TIME_SERIES_URL = "https://api.twelvedata.com/time_series"
-
-# 10 seconds cache = around 6 requests/minute
 CACHE_SECONDS = 10
 
 cached_today = None
@@ -24,6 +18,15 @@ last_error = ""
 
 def myanmar_now():
     return datetime.utcnow() + timedelta(hours=6, minutes=30)
+
+
+def clean_text(raw_html):
+    text = re.sub(r"<script[\s\S]*?</script>", " ", raw_html, flags=re.I)
+    text = re.sub(r"<style[\s\S]*?</style>", " ", text, flags=re.I)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = html.unescape(text)
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
 
 
 def get_digits(value):
@@ -43,7 +46,7 @@ def get_last_digit(value):
 
 def get_set_decimal_two(price):
     try:
-        price_float = float(price)
+        price_float = float(str(price).replace(",", ""))
         price_text = f"{price_float:.2f}"
         decimal_part = price_text.split(".")[1]
         return decimal_part[-2:]
@@ -56,13 +59,11 @@ def get_market_session():
     current = now.hour * 60 + now.minute
 
     # Myanmar Time
-    # Morning: 08:00 AM - 12:01 PM
-    morning_open = 480
-    morning_close = 721
+    morning_open = 480      # 08:00 AM
+    morning_close = 721     # 12:01 PM
 
-    # Evening: 01:00 PM - 04:31 PM
-    evening_open = 780
-    evening_close = 991
+    evening_open = 780      # 01:00 PM
+    evening_close = 991     # 04:31 PM
 
     status = "CLOSE"
     session = "none"
@@ -93,12 +94,6 @@ def get_market_session():
         display_session = "evening"
         next_session = "Tomorrow Morning 08:00 AM"
 
-    else:
-        status = "CLOSE"
-        session = "none"
-        display_session = "none"
-        next_session = "Morning Session 08:00 AM"
-
     return {
         "status": status,
         "session": session,
@@ -110,199 +105,77 @@ def get_market_session():
     }
 
 
-def fetch_json(url, params):
-    full_url = url + "?" + urlencode(params)
-
+def fetch_set_official():
     request = Request(
-        full_url,
+        SET_URL,
         headers={
-            "User-Agent": "MM2D3DInfo/1.0"
+            "User-Agent": "Mozilla/5.0 MM2D3DInfo/1.0"
         }
     )
 
-    try:
-        with urlopen(request, timeout=20) as response:
-            body = response.read().decode("utf-8")
-            data = json.loads(body)
-            return data
+    with urlopen(request, timeout=20) as response:
+        body = response.read().decode("utf-8", errors="ignore")
 
-    except HTTPError as e:
-        try:
-            body = e.read().decode("utf-8")
-            data = json.loads(body)
-            message = data.get("message", body)
-        except:
-            message = str(e)
+    text = clean_text(body)
 
-        raise Exception(message)
+    market_status = "--"
+    last_update = "--"
 
+    status_match = re.search(r"Market Status\s+([A-Za-z0-9]+)", text)
+    if status_match:
+        market_status = status_match.group(1)
 
-def validate_twelve_data_response(data):
-    if data is None:
-        raise Exception("Empty Twelve Data response")
+    update_match = re.search(
+        r"Last Update\s+(\d{2}\s+[A-Za-z]{3}\s+\d{4}\s+\d{2}:\d{2}:\d{2})",
+        text
+    )
+    if update_match:
+        last_update = update_match.group(1)
 
-    if "status" in data and str(data.get("status")).lower() == "error":
-        raise Exception(data.get("message", "Twelve Data API error"))
+    # SET row example from official page:
+    # SET 1,616.34 +5.06 7,205,959 50,797.41
+    set_pattern = r"\bSET\s+([\d,]+\.\d{2})\s+([+-][\d,]+\.\d{2})\s+([\d,]+)\s+([\d,]+\.\d{2})"
+    set_match = re.search(set_pattern, text)
 
-    if "code" in data and "message" in data:
-        raise Exception(data.get("message", "Twelve Data API error"))
+    if not set_match:
+        raise Exception("SET row not found from official SET website")
 
-
-def call_quote_symbol_exchange():
-    params = {
-        "symbol": "SET",
-        "exchange": "XBKK",
-        "apikey": TWELVE_DATA_API_KEY
-    }
-
-    data = fetch_json(QUOTE_URL, params)
-    validate_twelve_data_response(data)
+    set_index = set_match.group(1)
+    change = set_match.group(2)
+    volume = set_match.group(3)
+    trading_value = set_match.group(4)
 
     return {
-        "sourceSymbol": "SET:XBKK",
-        "raw": data
+        "setIndex": set_index,
+        "change": change,
+        "volume": volume,
+        "tradingValue": trading_value,
+        "marketStatusFromSET": market_status,
+        "lastUpdateFromSET": last_update
     }
 
 
-def call_quote_colon_symbol():
-    params = {
-        "symbol": "SET:XBKK",
-        "apikey": TWELVE_DATA_API_KEY
-    }
-
-    data = fetch_json(QUOTE_URL, params)
-    validate_twelve_data_response(data)
-
-    return {
-        "sourceSymbol": "SET:XBKK",
-        "raw": data
-    }
-
-
-def call_time_series_symbol_exchange():
-    params = {
-        "symbol": "SET",
-        "exchange": "XBKK",
-        "interval": "1min",
-        "outputsize": "1",
-        "apikey": TWELVE_DATA_API_KEY
-    }
-
-    data = fetch_json(TIME_SERIES_URL, params)
-    validate_twelve_data_response(data)
-
-    values = data.get("values")
-
-    if values is None or len(values) == 0:
-        raise Exception("No time_series values found")
-
-    latest = values[0]
-
-    quote_like = {
-        "open": latest.get("open", "--"),
-        "high": latest.get("high", "--"),
-        "low": latest.get("low", "--"),
-        "close": latest.get("close", "--"),
-        "volume": latest.get("volume", "0"),
-        "datetime": latest.get("datetime", "--")
-    }
-
-    return {
-        "sourceSymbol": "SET:XBKK",
-        "raw": quote_like
-    }
-
-
-def call_time_series_colon_symbol():
-    params = {
-        "symbol": "SET:XBKK",
-        "interval": "1min",
-        "outputsize": "1",
-        "apikey": TWELVE_DATA_API_KEY
-    }
-
-    data = fetch_json(TIME_SERIES_URL, params)
-    validate_twelve_data_response(data)
-
-    values = data.get("values")
-
-    if values is None or len(values) == 0:
-        raise Exception("No time_series values found")
-
-    latest = values[0]
-
-    quote_like = {
-        "open": latest.get("open", "--"),
-        "high": latest.get("high", "--"),
-        "low": latest.get("low", "--"),
-        "close": latest.get("close", "--"),
-        "volume": latest.get("volume", "0"),
-        "datetime": latest.get("datetime", "--")
-    }
-
-    return {
-        "sourceSymbol": "SET:XBKK",
-        "raw": quote_like
-    }
-
-
-def call_twelve_data():
-    errors = []
-
-    callers = [
-        call_quote_symbol_exchange,
-        call_quote_colon_symbol,
-        call_time_series_symbol_exchange,
-        call_time_series_colon_symbol
-    ]
-
-    for caller in callers:
-        try:
-            return caller()
-        except Exception as e:
-            errors.append(str(e))
-
-    raise Exception("Twelve Data failed: " + " | ".join(errors))
-
-
-def build_result_data(api_result):
+def build_result_data(set_data):
     now = myanmar_now()
     session_info = get_market_session()
 
-    quote_data = api_result["raw"]
-    source_symbol = api_result["sourceSymbol"]
+    set_index = set_data["setIndex"]
+    trading_value = set_data["tradingValue"]
 
-    close_price = quote_data.get("close")
-
-    if close_price is None or close_price == "" or close_price == "--":
-        close_price = quote_data.get("price")
-
-    if close_price is None or close_price == "" or close_price == "--":
-        close_price = quote_data.get("previous_close")
-
-    if close_price is None or close_price == "" or close_price == "--":
-        raise Exception("SET index price not found in Twelve Data response")
-
-    market_value = quote_data.get("volume")
-
-    if market_value is None or market_value == "" or market_value == "--":
-        market_value = quote_data.get("average_volume")
-
-    if market_value is None or market_value == "" or market_value == "--":
-        market_value = "0"
-
-    # SET Index 1342.56 => decimal two = 56 => last digit = 6
-    set_decimal_two = get_set_decimal_two(close_price)
+    # Example:
+    # SET Index 1342.56 -> decimal two = 56 -> last digit = 6
+    set_decimal_two = get_set_decimal_two(set_index)
 
     if set_decimal_two == "--":
         set_last_digit = "0"
     else:
         set_last_digit = set_decimal_two[-1]
 
-    # Market Turnover / Volume 45821900 => last digit = 0
-    value_last_digit = get_last_digit(market_value)
+    # Example:
+    # Market Turnover / Value 45821900 -> last digit = 0
+    # Here we use SET official Value (M.Baht) digits.
+    value_last_digit = get_last_digit(trading_value)
 
-    # 6 + 0 = 60
     result_2d = set_last_digit + value_last_digit
 
     display_session = session_info["displaySession"]
@@ -321,15 +194,16 @@ def build_result_data(api_result):
     return {
         "success": True,
         "date": now.strftime("%Y-%m-%d"),
-        "symbol": source_symbol,
+        "symbol": "SET Official",
 
         "status": session_info["status"],
         "session": session_info["session"],
         "displaySession": session_info["displaySession"],
         "nextSession": session_info["nextSession"],
 
-        "set": str(close_price),
-        "value": str(market_value),
+        "set": str(set_index),
+        "value": str(trading_value),
+        "volume": str(set_data["volume"]),
 
         "setDecimalTwo": set_decimal_two,
         "setLastDigit": set_last_digit,
@@ -340,17 +214,15 @@ def build_result_data(api_result):
         "eveningResult": evening_result,
 
         "updatedAt": now.strftime("%Y-%m-%d %H:%M:%S"),
+        "setLastUpdate": set_data["lastUpdateFromSET"],
+        "setMarketStatus": set_data["marketStatusFromSET"],
+
         "cached": False,
-        "dataSource": "Twelve Data",
+        "dataSource": "SET Official Website",
         "timezone": "Myanmar Time UTC+6:30",
 
-        "open": quote_data.get("open", "--"),
-        "high": quote_data.get("high", "--"),
-        "low": quote_data.get("low", "--"),
-        "close": quote_data.get("close", "--"),
-        "previousClose": quote_data.get("previous_close", "--"),
-        "change": quote_data.get("change", "--"),
-        "percentChange": quote_data.get("percent_change", "--")
+        "change": set_data["change"],
+        "sourceUrl": SET_URL
     }
 
 
@@ -358,8 +230,8 @@ def build_result_data(api_result):
 def home():
     return jsonify({
         "success": True,
-        "message": "Twelve Data SET API running with direct API key",
-        "symbol": "SET:XBKK"
+        "message": "SET Official Website API running",
+        "source": SET_URL
     })
 
 
@@ -378,8 +250,8 @@ def today():
         return jsonify(response)
 
     try:
-        api_result = call_twelve_data()
-        fresh_data = build_result_data(api_result)
+        set_data = fetch_set_official()
+        fresh_data = build_result_data(set_data)
 
         cached_today = fresh_data
         cached_time = now_time
@@ -399,8 +271,7 @@ def today():
         return jsonify({
             "success": False,
             "message": last_error,
-            "dataSource": "Twelve Data",
-            "symbol": "SET:XBKK",
+            "dataSource": "SET Official Website",
             "cached": False
         }), 429
 
