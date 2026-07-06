@@ -8,6 +8,7 @@ import gzip
 import zlib
 from urllib.request import urlopen, Request
 from urllib.error import HTTPError
+from urllib.parse import urlencode
 
 app = Flask(__name__)
 
@@ -26,14 +27,14 @@ THAI_HISTORY_URL = os.environ.get(
     "https://api.thaistock2d.com/history"
 )
 
-TWSE_INDEX_URL = os.environ.get(
-    "TWSE_INDEX_URL",
-    "https://openapi.twse.com.tw/v1/indicesReport/MI_5MINS_HIST"
+FINMIND_API_URL = os.environ.get(
+    "FINMIND_API_URL",
+    "https://api.finmindtrade.com/api/v4/data"
 )
 
-TWSE_MI_INDEX_URL = os.environ.get(
-    "TWSE_MI_INDEX_URL",
-    "https://openapi.twse.com.tw/v1/exchangeReport/MI_INDEX"
+FINMIND_TOKEN = os.environ.get(
+    "FINMIND_TOKEN",
+    ""
 )
 
 CACHE_SECONDS = 10
@@ -46,12 +47,16 @@ cached_today_time = 0
 cached_history = None
 cached_history_time = 0
 
-cached_tw_result = None
+cached_tw_info = None
 cached_tw_time = 0
 
 
 def myanmar_now():
     return datetime.utcnow() + timedelta(hours=6, minutes=30)
+
+
+def taiwan_now():
+    return datetime.utcnow() + timedelta(hours=8)
 
 
 def fetch_json(url):
@@ -97,6 +102,11 @@ def fetch_json(url):
     except HTTPError as e:
         body = e.read().decode("utf-8", errors="ignore")
         raise Exception(body)
+
+
+def build_url(base_url, params):
+    query = urlencode(params)
+    return base_url + "?" + query
 
 
 def get_market_session():
@@ -425,11 +435,11 @@ def get_modern_internet_for_date(date_iso, allow_current_fallback=False):
     }
 
 
-def get_tw_result_from_closing_index(closing_index):
+def get_tw_result_from_index(index_value):
     try:
-        text = str(closing_index).replace(",", "").strip()
+        text = str(index_value).replace(",", "").strip()
 
-        if text == "" or text == "--":
+        if text == "" or text == "--" or text.lower() == "none":
             return "--"
 
         if "." in text:
@@ -452,89 +462,169 @@ def get_tw_result_from_closing_index(closing_index):
         return "--"
 
 
-def get_twse_from_hist():
-    data = fetch_json(TWSE_INDEX_URL)
+def normalize_finmind_items(raw_data):
+    if isinstance(raw_data, list):
+        return raw_data
 
-    if not isinstance(data, list) or len(data) == 0:
+    if not isinstance(raw_data, dict):
+        return []
+
+    data = raw_data.get("data", [])
+
+    if isinstance(data, list):
+        return data
+
+    if isinstance(data, dict):
+        rows = []
+
+        # column-list format ဖြစ်ခဲ့ရင် row-list ပြန်ပြောင်းရန်
+        keys = list(data.keys())
+        if len(keys) == 0:
+            return []
+
+        first_value = data.get(keys[0])
+
+        if isinstance(first_value, list):
+            row_count = len(first_value)
+
+            for i in range(row_count):
+                row = {}
+
+                for key in keys:
+                    value_list = data.get(key, [])
+                    if isinstance(value_list, list) and i < len(value_list):
+                        row[key] = value_list[i]
+
+                rows.append(row)
+
+            return rows
+
+    return []
+
+
+def get_item_time_text(item):
+    if not isinstance(item, dict):
+        return ""
+
+    value = item.get("date", "")
+
+    if value is None:
+        value = item.get("time", "")
+
+    return str(value)
+
+
+def get_taiex_value(item):
+    if not isinstance(item, dict):
         return "--"
 
-    latest_item = None
-    latest_date = ""
+    possible_keys = [
+        "TAIEX",
+        "taiex",
+        "TAIEXIndex",
+        "index",
+        "Index",
+        "value",
+        "Value",
+        "close",
+        "Close"
+    ]
 
-    for item in data:
-        if not isinstance(item, dict):
-            continue
+    for key in possible_keys:
+        value = item.get(key)
 
-        date_text = str(item.get("Date", ""))
+        if value is not None and str(value).strip() != "":
+            return str(value)
 
-        if latest_item is None or date_text > latest_date:
-            latest_item = item
-            latest_date = date_text
-
-    if latest_item is None:
-        return "--"
-
-    closing_index = latest_item.get("ClosingIndex", "--")
-    return get_tw_result_from_closing_index(closing_index)
-
-
-def get_twse_from_mi_index():
-    data = fetch_json(TWSE_MI_INDEX_URL)
-
-    if not isinstance(data, list) or len(data) == 0:
-        return "--"
-
-    target_item = None
-
-    for item in data:
-        if not isinstance(item, dict):
-            continue
-
-        index_name = str(item.get("指數", ""))
-
-        if index_name == "發行量加權股價指數":
-            target_item = item
-            break
-
-    if target_item is None:
-        return "--"
-
-    closing_index = target_item.get("收盤指數", "--")
-    return get_tw_result_from_closing_index(closing_index)
+    return "--"
 
 
-def get_twse_latest_result():
-    global cached_tw_result
+def get_finmind_tw_latest_info():
+    global cached_tw_info
     global cached_tw_time
 
     now_time = time.time()
 
-    if cached_tw_result is not None and cached_tw_result != "--" and now_time - cached_tw_time < TW_CACHE_SECONDS:
-        return cached_tw_result
+    if cached_tw_info is not None and cached_tw_info.get("result", "--") != "--":
+        if now_time - cached_tw_time < TW_CACHE_SECONDS:
+            return cached_tw_info
+
+    end_date = taiwan_now().strftime("%Y-%m-%d")
+    start_date = (taiwan_now() - timedelta(days=14)).strftime("%Y-%m-%d")
+
+    params = {
+        "dataset": "TaiwanVariousIndicators5Seconds",
+        "start_date": start_date,
+        "end_date": end_date
+    }
+
+    if FINMIND_TOKEN is not None and FINMIND_TOKEN.strip() != "":
+        params["token"] = FINMIND_TOKEN.strip()
+
+    url = build_url(FINMIND_API_URL, params)
+
+    info = {
+        "result": "--",
+        "latestTime": "--",
+        "latestTAIEX": "--",
+        "sourceUrl": FINMIND_API_URL,
+        "dataset": "TaiwanVariousIndicators5Seconds",
+        "startDate": start_date,
+        "endDate": end_date,
+        "count": 0,
+        "error": ""
+    }
 
     try:
-        result = get_twse_from_hist()
+        raw_data = fetch_json(url)
+        items = normalize_finmind_items(raw_data)
 
-        if result != "--":
-            cached_tw_result = result
-            cached_tw_time = now_time
-            return result
+        info["count"] = len(items)
 
-    except:
-        pass
+        if len(items) == 0:
+            info["error"] = "FinMind returned empty data"
+            return info
 
-    try:
-        result = get_twse_from_mi_index()
+        latest_item = None
+        latest_time = ""
 
-        if result != "--":
-            cached_tw_result = result
-            cached_tw_time = now_time
-            return result
+        for item in items:
+            if not isinstance(item, dict):
+                continue
 
-    except:
-        pass
+            time_text = get_item_time_text(item)
 
-    return "--"
+            if latest_item is None or time_text > latest_time:
+                latest_item = item
+                latest_time = time_text
+
+        if latest_item is None:
+            info["error"] = "No latest item found"
+            return info
+
+        taiex_value = get_taiex_value(latest_item)
+        tw_result = get_tw_result_from_index(taiex_value)
+
+        info["latestTime"] = latest_time
+        info["latestTAIEX"] = taiex_value
+        info["result"] = tw_result
+
+        if tw_result == "--":
+            info["error"] = "TAIEX field not found or invalid"
+
+        cached_tw_info = info
+        cached_tw_time = now_time
+
+        return info
+
+    except Exception as e:
+        info["error"] = str(e)
+        return info
+
+
+def get_tw_result():
+    info = get_finmind_tw_latest_info()
+    return info.get("result", "--")
 
 
 def format_time_12h(raw_time):
@@ -592,7 +682,7 @@ def build_today_response(live_data):
     live_time = str(live.get("time", "--"))
 
     modern_data = get_modern_internet_for_date(live_date, True)
-    tw_result = get_twse_latest_result()
+    tw_result = get_tw_result()
 
     if modern_data["morningModern"] == "--":
         modern_data["morningModern"] = twod_or_dash(morning_1100)
@@ -654,10 +744,10 @@ def build_today_response(live_data):
         "serverTime": str(live_data.get("server_time", "--")),
 
         "cached": False,
-        "dataSource": "ThaiStock2D + TWSE API",
+        "dataSource": "ThaiStock2D + FinMind API",
         "sourceUrl": THAI_LIVE_URL,
-        "twSourceUrl": TWSE_INDEX_URL,
-        "twBackupSourceUrl": TWSE_MI_INDEX_URL,
+        "twSourceUrl": FINMIND_API_URL,
+        "twDataset": "TaiwanVariousIndicators5Seconds",
         "timezone": "Myanmar Time UTC+6:30"
     }
 
@@ -674,7 +764,7 @@ def normalize_history(raw_data):
     max_days_to_enrich = 20
     day_counter = 0
 
-    tw_result = get_twse_latest_result()
+    tw_result = get_tw_result()
 
     for day in raw_data:
         if not isinstance(day, dict):
@@ -807,12 +897,12 @@ def normalize_history(raw_data):
 def home():
     return jsonify({
         "success": True,
-        "message": "MM 2D 3D API running with ThaiStock2D + TWSE",
+        "message": "MM 2D 3D API running with ThaiStock2D + FinMind",
         "today": "/today",
         "history": "/history",
         "statusApi": "/status",
         "twCheck": "/tw-check",
-        "dataSource": "ThaiStock2D + TWSE API"
+        "dataSource": "ThaiStock2D + FinMind API"
     })
 
 
@@ -847,7 +937,7 @@ def today():
         return jsonify({
             "success": False,
             "message": str(e),
-            "dataSource": "ThaiStock2D + TWSE API",
+            "dataSource": "ThaiStock2D + FinMind API",
             "cached": False
         }), 500
 
@@ -870,15 +960,15 @@ def history():
 
         response = {
             "success": True,
-            "dataSource": "ThaiStock2D + TWSE API",
+            "dataSource": "ThaiStock2D + FinMind API",
             "count": len(flat_history),
             "daysCount": len(day_list),
             "history": flat_history,
             "days": day_list,
             "cached": False,
             "sourceUrl": THAI_RESULT_URL,
-            "twSourceUrl": TWSE_INDEX_URL,
-            "twBackupSourceUrl": TWSE_MI_INDEX_URL
+            "twSourceUrl": FINMIND_API_URL,
+            "twDataset": "TaiwanVariousIndicators5Seconds"
         }
 
         cached_history = response
@@ -890,40 +980,27 @@ def history():
         return jsonify({
             "success": False,
             "message": str(e),
-            "dataSource": "ThaiStock2D + TWSE API",
+            "dataSource": "ThaiStock2D + FinMind API",
             "cached": False
         }), 500
 
 
 @app.route("/tw-check")
 def tw_check():
-    hist_result = "--"
-    mi_result = "--"
-    final_result = "--"
-    hist_error = ""
-    mi_error = ""
-
-    try:
-        hist_result = get_twse_from_hist()
-    except Exception as e:
-        hist_error = str(e)
-
-    try:
-        mi_result = get_twse_from_mi_index()
-    except Exception as e:
-        mi_error = str(e)
-
-    final_result = get_twse_latest_result()
+    info = get_finmind_tw_latest_info()
 
     return jsonify({
         "success": True,
-        "histUrl": TWSE_INDEX_URL,
-        "miIndexUrl": TWSE_MI_INDEX_URL,
-        "histResult": hist_result,
-        "miIndexResult": mi_result,
-        "finalTW": final_result,
-        "histError": hist_error,
-        "miIndexError": mi_error
+        "source": "FinMind",
+        "sourceUrl": FINMIND_API_URL,
+        "dataset": info.get("dataset", "TaiwanVariousIndicators5Seconds"),
+        "startDate": info.get("startDate", "--"),
+        "endDate": info.get("endDate", "--"),
+        "count": info.get("count", 0),
+        "latestTime": info.get("latestTime", "--"),
+        "latestTAIEX": info.get("latestTAIEX", "--"),
+        "finalTW": info.get("result", "--"),
+        "error": info.get("error", "")
     })
 
 
