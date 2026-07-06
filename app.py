@@ -1,14 +1,23 @@
 from flask import Flask, jsonify
-import yfinance as yf
 from datetime import datetime, timedelta
 import time
+import os
+import json
+from urllib.request import urlopen, Request
+from urllib.parse import urlencode
 
 app = Flask(__name__)
 
-SYMBOL = "^SET.BK"
+# Twelve Data SET Index symbol
+SYMBOL = "SET:XBKK"
+API_URL = "https://api.twelvedata.com/quote"
 
-# 10 seconds live cache
+# Twelve Data Basic plan = 8 requests/minute
+# 10 seconds cache = 6 requests/minute
 CACHE_SECONDS = 10
+
+# Render Environment Variable ထဲမှာ TD_API_KEY ထည့်ထားရမယ်
+TD_API_KEY = os.environ.get("TD_API_KEY", "")
 
 cached_today = None
 cached_time = 0
@@ -19,9 +28,14 @@ def myanmar_now():
     return datetime.utcnow() + timedelta(hours=6, minutes=30)
 
 
-def get_last_digit(value):
+def get_digits(value):
     text = str(value)
     digits = "".join(ch for ch in text if ch.isdigit())
+    return digits
+
+
+def get_last_digit(value):
+    digits = get_digits(value)
 
     if len(digits) == 0:
         return "0"
@@ -29,10 +43,14 @@ def get_last_digit(value):
     return digits[-1]
 
 
-def get_set_decimal_two(close_price):
-    set_text = f"{close_price:.2f}"
-    decimal_part = set_text.split(".")[1]
-    return decimal_part[-2:]
+def get_set_decimal_two(price):
+    try:
+        price_float = float(price)
+        price_text = f"{price_float:.2f}"
+        decimal_part = price_text.split(".")[1]
+        return decimal_part[-2:]
+    except:
+        return "--"
 
 
 def get_market_session():
@@ -94,15 +112,81 @@ def get_market_session():
     }
 
 
-def build_result_data(close_price, market_value, data_source):
+def call_twelve_data_quote():
+    if TD_API_KEY == "":
+        raise Exception("TD_API_KEY is missing in Render Environment")
+
+    params = urlencode({
+        "symbol": SYMBOL,
+        "apikey": TD_API_KEY
+    })
+
+    url = API_URL + "?" + params
+
+    request = Request(
+        url,
+        headers={
+            "User-Agent": "MM2D3DInfo/1.0"
+        }
+    )
+
+    with urlopen(request, timeout=20) as response:
+        body = response.read().decode("utf-8")
+        data = json.loads(body)
+
+    # Twelve Data error response
+    if "status" in data and str(data.get("status")).lower() == "error":
+        raise Exception(data.get("message", "Twelve Data API error"))
+
+    if "code" in data and "message" in data:
+        raise Exception(data.get("message", "Twelve Data API error"))
+
+    return data
+
+
+def build_result_data(quote_data):
+    now = myanmar_now()
+    session_info = get_market_session()
+
+    # Twelve Data quote မှာ close ကိုအဓိကယူမယ်
+    close_price = quote_data.get("close")
+
+    if close_price is None or close_price == "":
+        close_price = quote_data.get("price")
+
+    if close_price is None or close_price == "":
+        close_price = quote_data.get("previous_close")
+
+    if close_price is None or close_price == "":
+        raise Exception("SET index price not found in Twelve Data response")
+
+    # quote endpoint မှာ Market Turnover အစစ်မပါနိုင်ပါ
+    # volume ရှိရင် volume ကိုယူမယ်။ မရှိရင် 0 ထားမယ်။
+    market_value = quote_data.get("volume")
+
+    if market_value is None or market_value == "":
+        market_value = quote_data.get("average_volume")
+
+    if market_value is None or market_value == "":
+        market_value = "0"
+
+    # Example:
+    # SET Index 1342.56 -> decimal two = 56 -> last digit = 6
     set_decimal_two = get_set_decimal_two(close_price)
 
-    set_last_digit = set_decimal_two[-1]
+    if set_decimal_two == "--":
+        set_last_digit = "0"
+    else:
+        set_last_digit = set_decimal_two[-1]
+
+    # Example:
+    # Market Turnover / Volume 45821900 -> last digit = 0
     value_last_digit = get_last_digit(market_value)
 
+    # Result:
+    # 6 + 0 = 60
     result_2d = set_last_digit + value_last_digit
 
-    session_info = get_market_session()
     display_session = session_info["displaySession"]
 
     morning_result = "--"
@@ -116,8 +200,6 @@ def build_result_data(close_price, market_value, data_source):
         morning_result = "--"
         evening_result = result_2d
 
-    now = myanmar_now()
-
     return {
         "success": True,
         "date": now.strftime("%Y-%m-%d"),
@@ -128,7 +210,7 @@ def build_result_data(close_price, market_value, data_source):
         "displaySession": session_info["displaySession"],
         "nextSession": session_info["nextSession"],
 
-        "set": f"{close_price:.2f}",
+        "set": str(close_price),
         "value": str(market_value),
 
         "setDecimalTwo": set_decimal_two,
@@ -141,52 +223,25 @@ def build_result_data(close_price, market_value, data_source):
 
         "updatedAt": now.strftime("%Y-%m-%d %H:%M:%S"),
         "cached": False,
-        "dataSource": data_source,
-        "timezone": "Myanmar Time UTC+6:30"
+        "dataSource": "Twelve Data",
+        "timezone": "Myanmar Time UTC+6:30",
+
+        "open": quote_data.get("open", "--"),
+        "high": quote_data.get("high", "--"),
+        "low": quote_data.get("low", "--"),
+        "close": quote_data.get("close", "--"),
+        "previousClose": quote_data.get("previous_close", "--"),
+        "change": quote_data.get("change", "--"),
+        "percentChange": quote_data.get("percent_change", "--")
     }
-
-
-def fetch_market_data():
-    ticker = yf.Ticker(SYMBOL)
-
-    hist = ticker.history(period="5d", interval="1m")
-
-    if hist is None or hist.empty:
-        raise Exception("No market data found")
-
-    hist = hist.dropna()
-
-    if hist.empty:
-        raise Exception("No valid market data found")
-
-    last_row = hist.tail(1).iloc[0]
-
-    close_price = float(last_row["Close"])
-
-    try:
-        market_value = int(last_row["Volume"])
-    except:
-        market_value = 0
-
-    return build_result_data(close_price, market_value, "yfinance")
-
-
-def get_fallback_data(error_message):
-    close_price = 1611.99
-    market_value = 0
-
-    data = build_result_data(close_price, market_value, "fallback")
-    data["cached"] = True
-    data["lastError"] = error_message
-
-    return data
 
 
 @app.route("/")
 def home():
     return jsonify({
         "success": True,
-        "message": "YFinance SET API running with Myanmar time UTC+6:30"
+        "message": "Twelve Data SET API running",
+        "symbol": SYMBOL
     })
 
 
@@ -198,6 +253,7 @@ def today():
 
     now_time = time.time()
 
+    # cache ရှိပြီး 10 seconds မကျော်သေးရင် Twelve Data ကိုထပ်မခေါ်တော့ဘူး
     if cached_today is not None and now_time - cached_time < CACHE_SECONDS:
         response = dict(cached_today)
         response["cached"] = True
@@ -205,7 +261,8 @@ def today():
         return jsonify(response)
 
     try:
-        fresh_data = fetch_market_data()
+        quote_data = call_twelve_data_quote()
+        fresh_data = build_result_data(quote_data)
 
         cached_today = fresh_data
         cached_time = now_time
@@ -216,18 +273,20 @@ def today():
     except Exception as e:
         last_error = str(e)
 
+        # API error ဖြစ်ရင် အရင် cache ရှိတာ ပြန်ပြမယ်
         if cached_today is not None:
             response = dict(cached_today)
             response["cached"] = True
             response["lastError"] = last_error
             return jsonify(response)
 
-        fallback_data = get_fallback_data(last_error)
-
-        cached_today = fallback_data
-        cached_time = now_time
-
-        return jsonify(fallback_data)
+        return jsonify({
+            "success": False,
+            "message": last_error,
+            "dataSource": "Twelve Data",
+            "symbol": SYMBOL,
+            "cached": False
+        }), 429
 
 
 @app.route("/status")
