@@ -29,21 +29,6 @@ def clean_text(raw_html):
     return text.strip()
 
 
-def get_digits(value):
-    text = str(value)
-    digits = "".join(ch for ch in text if ch.isdigit())
-    return digits
-
-
-def get_last_digit(value):
-    digits = get_digits(value)
-
-    if len(digits) == 0:
-        return "0"
-
-    return digits[-1]
-
-
 def get_set_decimal_two(price):
     try:
         price_float = float(str(price).replace(",", ""))
@@ -52,6 +37,24 @@ def get_set_decimal_two(price):
         return decimal_part[-2:]
     except:
         return "--"
+
+
+def get_value_last_two_digits(value):
+    text = str(value)
+
+    # decimal မတိုင်ခင် integer part ပဲယူမယ်
+    integer_part = text.split(".")[0]
+
+    # comma ဖယ်မယ်
+    digits = "".join(ch for ch in integer_part if ch.isdigit())
+
+    if len(digits) >= 2:
+        return digits[-2:]
+
+    if len(digits) == 1:
+        return "0" + digits
+
+    return "00"
 
 
 def get_market_session():
@@ -124,6 +127,7 @@ def fetch_set_official():
     status_match = re.search(r"Market Status\s+([A-Za-z0-9]+)", text)
     if status_match:
         market_status = status_match.group(1)
+        market_status = market_status.replace("2", "")
 
     update_match = re.search(
         r"Last Update\s+(\d{2}\s+[A-Za-z]{3}\s+\d{4}\s+\d{2}:\d{2}:\d{2})",
@@ -132,7 +136,7 @@ def fetch_set_official():
     if update_match:
         last_update = update_match.group(1)
 
-    # SET row example from official page:
+    # Official SET page row example:
     # SET 1,616.34 +5.06 7,205,959 50,797.41
     set_pattern = r"\bSET\s+([\d,]+\.\d{2})\s+([+-][\d,]+\.\d{2})\s+([\d,]+)\s+([\d,]+\.\d{2})"
     set_match = re.search(set_pattern, text)
@@ -162,8 +166,8 @@ def build_result_data(set_data):
     set_index = set_data["setIndex"]
     trading_value = set_data["tradingValue"]
 
-    # Example:
-    # SET Index 1342.56 -> decimal two = 56 -> last digit = 6
+    # SET Index decimal two
+    # Example: 1,614.09 -> 09
     set_decimal_two = get_set_decimal_two(set_index)
 
     if set_decimal_two == "--":
@@ -171,12 +175,11 @@ def build_result_data(set_data):
     else:
         set_last_digit = set_decimal_two[-1]
 
-    # Example:
-    # Market Turnover / Value 45821900 -> last digit = 0
-    # Here we use SET official Value (M.Baht) digits.
-    value_last_digit = get_last_digit(trading_value)
+    # New rule:
+    # Value 52,662.47 -> 52662 -> last 2 digits = 62
+    value_last_two_digits = get_value_last_two_digits(trading_value)
 
-    result_2d = set_last_digit + value_last_digit
+    result_2d = value_last_two_digits
 
     display_session = session_info["displaySession"]
 
@@ -207,7 +210,9 @@ def build_result_data(set_data):
 
         "setDecimalTwo": set_decimal_two,
         "setLastDigit": set_last_digit,
-        "valueLastDigit": value_last_digit,
+
+        "valueLastDigit": value_last_two_digits[-1],
+        "valueLastTwoDigits": value_last_two_digits,
 
         "result2d": result_2d,
         "morningResult": morning_result,
