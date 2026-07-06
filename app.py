@@ -28,8 +28,14 @@ TWSE_INDEX_URL = os.environ.get(
     "https://openapi.twse.com.tw/v1/indicesReport/MI_5MINS_HIST"
 )
 
+TWSE_MI_INDEX_URL = os.environ.get(
+    "TWSE_MI_INDEX_URL",
+    "https://openapi.twse.com.tw/v1/exchangeReport/MI_INDEX"
+)
+
 CACHE_SECONDS = 10
 HISTORY_CACHE_SECONDS = 300
+TW_CACHE_SECONDS = 300
 
 cached_today = None
 cached_today_time = 0
@@ -39,7 +45,6 @@ cached_history_time = 0
 
 cached_tw_result = None
 cached_tw_time = 0
-TW_CACHE_SECONDS = 300
 
 
 def myanmar_now():
@@ -69,11 +74,11 @@ def get_market_session():
     now = myanmar_now()
     current = now.hour * 60 + now.minute
 
-    morning_open = 570      # 09:30 AM
-    morning_close = 721     # 12:01 PM
+    morning_open = 570
+    morning_close = 721
 
-    evening_open = 840      # 02:00 PM
-    evening_close = 990     # 04:30 PM
+    evening_open = 840
+    evening_close = 990
 
     status = "CLOSE"
     session = "none"
@@ -195,6 +200,7 @@ def extract_time(item):
         return str(item.get("open_time"))
 
     stock_datetime = str(item.get("stock_datetime", ""))
+
     if " " in stock_datetime:
         return stock_datetime.split(" ")[1]
 
@@ -252,13 +258,14 @@ def normalize_history_change_items(raw_data):
 
         if isinstance(value, dict):
             child = value.get("child")
+
             if isinstance(child, list):
                 return child
 
     return []
 
 
-def fetch_change_history_for_date(date_iso):
+def fetch_change_history_for_date(date_iso, allow_current_fallback):
     try:
         date_url = THAI_HISTORY_URL + "?date=" + date_iso
         data = fetch_json(date_url)
@@ -270,13 +277,16 @@ def fetch_change_history_for_date(date_iso):
     except:
         pass
 
-    try:
-        data = fetch_json(THAI_HISTORY_URL)
-        items = normalize_history_change_items(data)
-        return items
+    if allow_current_fallback:
+        try:
+            data = fetch_json(THAI_HISTORY_URL)
+            items = normalize_history_change_items(data)
+            return items
 
-    except:
-        return []
+        except:
+            return []
+
+    return []
 
 
 def find_first_twod_between(items, start_time, end_time):
@@ -348,8 +358,8 @@ def find_second_different_twod_between(items, start_time, end_time, first_twod):
     return extract_twod(best_item)
 
 
-def get_modern_internet_for_date(date_iso):
-    items = fetch_change_history_for_date(date_iso)
+def get_modern_internet_for_date(date_iso, allow_current_fallback=False):
+    items = fetch_change_history_for_date(date_iso, allow_current_fallback)
 
     morning_modern = find_first_twod_between(
         items,
@@ -413,57 +423,89 @@ def get_tw_result_from_closing_index(closing_index):
         return "--"
 
 
+def get_twse_from_hist():
+    data = fetch_json(TWSE_INDEX_URL)
+
+    if not isinstance(data, list) or len(data) == 0:
+        return "--"
+
+    latest_item = None
+    latest_date = ""
+
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+
+        date_text = str(item.get("Date", ""))
+
+        if latest_item is None or date_text > latest_date:
+            latest_item = item
+            latest_date = date_text
+
+    if latest_item is None:
+        return "--"
+
+    closing_index = latest_item.get("ClosingIndex", "--")
+    return get_tw_result_from_closing_index(closing_index)
+
+
+def get_twse_from_mi_index():
+    data = fetch_json(TWSE_MI_INDEX_URL)
+
+    if not isinstance(data, list) or len(data) == 0:
+        return "--"
+
+    target_item = None
+
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+
+        index_name = str(item.get("指數", ""))
+
+        if index_name == "發行量加權股價指數":
+            target_item = item
+            break
+
+    if target_item is None:
+        return "--"
+
+    closing_index = target_item.get("收盤指數", "--")
+    return get_tw_result_from_closing_index(closing_index)
+
+
 def get_twse_latest_result():
     global cached_tw_result
     global cached_tw_time
 
     now_time = time.time()
 
-    if cached_tw_result is not None and now_time - cached_tw_time < TW_CACHE_SECONDS:
+    if cached_tw_result is not None and cached_tw_result != "--" and now_time - cached_tw_time < TW_CACHE_SECONDS:
         return cached_tw_result
 
     try:
-        data = fetch_json(TWSE_INDEX_URL)
+        result = get_twse_from_hist()
 
-        if not isinstance(data, list) or len(data) == 0:
-            cached_tw_result = "--"
+        if result != "--":
+            cached_tw_result = result
             cached_tw_time = now_time
-            return "--"
-
-        latest_item = None
-        latest_date = ""
-
-        for item in data:
-            if not isinstance(item, dict):
-                continue
-
-            date_text = str(item.get("Date", item.get("日期", "")))
-
-            if latest_item is None or date_text > latest_date:
-                latest_item = item
-                latest_date = date_text
-
-        if latest_item is None:
-            cached_tw_result = "--"
-            cached_tw_time = now_time
-            return "--"
-
-        closing_index = latest_item.get(
-            "ClosingIndex",
-            latest_item.get("收盤指數", "--")
-        )
-
-        result = get_tw_result_from_closing_index(closing_index)
-
-        cached_tw_result = result
-        cached_tw_time = now_time
-
-        return result
+            return result
 
     except:
-        cached_tw_result = "--"
-        cached_tw_time = now_time
-        return "--"
+        pass
+
+    try:
+        result = get_twse_from_mi_index()
+
+        if result != "--":
+            cached_tw_result = result
+            cached_tw_time = now_time
+            return result
+
+    except:
+        pass
+
+    return "--"
 
 
 def format_time_12h(raw_time):
@@ -520,7 +562,7 @@ def build_today_response(live_data):
     live_date = str(live.get("date", session_info["date"]))
     live_time = str(live.get("time", "--"))
 
-    modern_data = get_modern_internet_for_date(live_date)
+    modern_data = get_modern_internet_for_date(live_date, True)
     tw_result = get_twse_latest_result()
 
     if modern_data["morningModern"] == "--":
@@ -586,6 +628,7 @@ def build_today_response(live_data):
         "dataSource": "ThaiStock2D + TWSE API",
         "sourceUrl": THAI_LIVE_URL,
         "twSourceUrl": TWSE_INDEX_URL,
+        "twBackupSourceUrl": TWSE_MI_INDEX_URL,
         "timezone": "Myanmar Time UTC+6:30"
     }
 
@@ -647,7 +690,7 @@ def normalize_history(raw_data):
         }
 
         if day_counter < max_days_to_enrich:
-            modern_data = get_modern_internet_for_date(date_iso)
+            modern_data = get_modern_internet_for_date(date_iso, False)
             modern_data["morningTW"] = tw_result
 
         day_data = {
@@ -739,6 +782,7 @@ def home():
         "today": "/today",
         "history": "/history",
         "statusApi": "/status",
+        "twCheck": "/tw-check",
         "dataSource": "ThaiStock2D + TWSE API"
     })
 
@@ -804,7 +848,8 @@ def history():
             "days": day_list,
             "cached": False,
             "sourceUrl": THAI_RESULT_URL,
-            "twSourceUrl": TWSE_INDEX_URL
+            "twSourceUrl": TWSE_INDEX_URL,
+            "twBackupSourceUrl": TWSE_MI_INDEX_URL
         }
 
         cached_history = response
@@ -819,6 +864,38 @@ def history():
             "dataSource": "ThaiStock2D + TWSE API",
             "cached": False
         }), 500
+
+
+@app.route("/tw-check")
+def tw_check():
+    hist_result = "--"
+    mi_result = "--"
+    final_result = "--"
+    hist_error = ""
+    mi_error = ""
+
+    try:
+        hist_result = get_twse_from_hist()
+    except Exception as e:
+        hist_error = str(e)
+
+    try:
+        mi_result = get_twse_from_mi_index()
+    except Exception as e:
+        mi_error = str(e)
+
+    final_result = get_twse_latest_result()
+
+    return jsonify({
+        "success": True,
+        "histUrl": TWSE_INDEX_URL,
+        "miIndexUrl": TWSE_MI_INDEX_URL,
+        "histResult": hist_result,
+        "miIndexResult": mi_result,
+        "finalTW": final_result,
+        "histError": hist_error,
+        "miIndexError": mi_error
+    })
 
 
 @app.route("/status")
