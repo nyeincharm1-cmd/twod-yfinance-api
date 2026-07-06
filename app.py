@@ -3,17 +3,34 @@ from datetime import datetime, timedelta
 import time
 import re
 import html
+import os
+import json
 from urllib.request import urlopen, Request
+from urllib.error import HTTPError
 
 app = Flask(__name__)
 
 SET_URL = "https://www.set.or.th/en/home"
+
+RAPIDAPI_KEY = os.environ.get("RAPIDAPI_KEY", "")
+RAPIDAPI_HOST = os.environ.get(
+    "RAPIDAPI_HOST",
+    "myanmar-all-in-one-2d-results.p.rapidapi.com"
+)
+RAPIDAPI_HISTORY_URL = os.environ.get(
+    "RAPIDAPI_HISTORY_URL",
+    "https://myanmar-all-in-one-2d-results.p.rapidapi.com/api/v1/calendar"
+)
 
 CACHE_SECONDS = 10
 
 cached_today = None
 cached_time = 0
 last_error = ""
+
+cached_history = None
+cached_history_time = 0
+HISTORY_CACHE_SECONDS = 300
 
 daily_store = {
     "date": "",
@@ -72,19 +89,12 @@ def get_set_decimal_two(price):
 
 def get_value_last_digit(value):
     text = str(value)
-
-    # decimal မတိုင်ခင် integer part ပဲယူမယ်
-    # Example: 52,662.47 -> 52,662
     integer_part = text.split(".")[0]
-
-    # comma ဖယ်မယ်
-    # Example: 52,662 -> 52662
     digits = "".join(ch for ch in integer_part if ch.isdigit())
 
     if len(digits) == 0:
         return "0"
 
-    # Example: 52662 -> 2
     return digits[-1]
 
 
@@ -92,12 +102,11 @@ def get_market_session():
     now = myanmar_now()
     current = now.hour * 60 + now.minute
 
-    # Myanmar Time
-    morning_open = 480      # 08:00 AM
-    morning_close = 721     # 12:01 PM
+    morning_open = 480
+    morning_close = 721
 
-    evening_open = 780      # 01:00 PM
-    evening_close = 991     # 04:31 PM
+    evening_open = 780
+    evening_close = 991
 
     status = "CLOSE"
     session = "none"
@@ -167,8 +176,6 @@ def fetch_set_official():
     if update_match:
         last_update = update_match.group(1)
 
-    # Official SET row example:
-    # SET 1,616.34 +5.06 7,205,959 50,797.41
     set_pattern = r"\bSET\s+([\d,]+\.\d{2})\s+([+-][\d,]+\.\d{2})\s+([\d,]+)\s+([\d,]+\.\d{2})"
     set_match = re.search(set_pattern, text)
 
@@ -201,7 +208,6 @@ def build_result_data(set_data):
     set_index = set_data["setIndex"]
     trading_value = set_data["tradingValue"]
 
-    # SET Index 1342.56 -> decimal two = 56 -> last digit = 6
     set_decimal_two = get_set_decimal_two(set_index)
 
     if set_decimal_two == "--":
@@ -209,23 +215,19 @@ def build_result_data(set_data):
     else:
         set_last_digit = set_decimal_two[-1]
 
-    # Market Turnover 52,662.47 -> integer 52662 -> last digit = 2
     value_last_digit = get_value_last_digit(trading_value)
 
-    # Correct 2D formula
     result_2d = set_last_digit + value_last_digit
 
     updated_at = now.strftime("%Y-%m-%d %H:%M:%S")
     display_session = session_info["displaySession"]
 
-    # 12:00 PM row အတွက်သိမ်း
     if display_session == "morning":
         daily_store["morningSet"] = str(set_index)
         daily_store["morningValue"] = str(trading_value)
         daily_store["morningResult"] = result_2d
         daily_store["morningUpdatedAt"] = updated_at
 
-    # 4:30 PM row အတွက်သိမ်း
     elif display_session == "evening":
         daily_store["eveningSet"] = str(set_index)
         daily_store["eveningValue"] = str(trading_value)
@@ -275,11 +277,73 @@ def build_result_data(set_data):
     }
 
 
+def fetch_rapidapi_history():
+    if RAPIDAPI_KEY == "":
+        raise Exception("RAPIDAPI_KEY is missing in Render Environment")
+
+    request = Request(
+        RAPIDAPI_HISTORY_URL,
+        headers={
+            "Content-Type": "application/json",
+            "x-rapidapi-host": RAPIDAPI_HOST,
+            "x-rapidapi-key": RAPIDAPI_KEY
+        }
+    )
+
+    try:
+        with urlopen(request, timeout=30) as response:
+            body = response.read().decode("utf-8", errors="ignore")
+            return json.loads(body)
+
+    except HTTPError as e:
+        body = e.read().decode("utf-8", errors="ignore")
+        raise Exception(body)
+
+
+def normalize_history(raw_data):
+    items = []
+
+    if isinstance(raw_data, dict):
+        if "twoDCalendar" in raw_data:
+            items = raw_data.get("twoDCalendar", [])
+        elif "data" in raw_data:
+            items = raw_data.get("data", [])
+        elif "result" in raw_data:
+            items = raw_data.get("result", [])
+
+    elif isinstance(raw_data, list):
+        items = raw_data
+
+    history = []
+
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+
+        date = str(item.get("date", "--"))
+        time_value = str(item.get("time", "--"))
+        result = str(item.get("result", "--"))
+        set_value = str(item.get("set", "--"))
+        market_value = str(item.get("value", "--"))
+
+        history.append({
+            "date": date,
+            "time": time_value,
+            "result": result,
+            "set": set_value,
+            "value": market_value
+        })
+
+    return history
+
+
 @app.route("/")
 def home():
     return jsonify({
         "success": True,
-        "message": "SET Official Website API running with 12PM and 4:30PM rows",
+        "message": "MM 2D 3D API running",
+        "today": "/today",
+        "history": "/history",
         "source": SET_URL
     })
 
@@ -323,6 +387,43 @@ def today():
             "dataSource": "SET Official Website",
             "cached": False
         }), 429
+
+
+@app.route("/history")
+def history():
+    global cached_history
+    global cached_history_time
+
+    now_time = time.time()
+
+    if cached_history is not None and now_time - cached_history_time < HISTORY_CACHE_SECONDS:
+        response = dict(cached_history)
+        response["cached"] = True
+        return jsonify(response)
+
+    try:
+        raw_data = fetch_rapidapi_history()
+        history_data = normalize_history(raw_data)
+
+        response = {
+            "success": True,
+            "dataSource": "RapidAPI Myanmar All In One 2D Results",
+            "count": len(history_data),
+            "history": history_data,
+            "cached": False
+        }
+
+        cached_history = response
+        cached_history_time = now_time
+
+        return jsonify(response)
+
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "message": str(e),
+            "dataSource": "RapidAPI Myanmar All In One 2D Results"
+        }), 500
 
 
 @app.route("/status")
