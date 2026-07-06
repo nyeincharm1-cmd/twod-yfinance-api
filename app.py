@@ -3,6 +3,7 @@ from datetime import datetime, timedelta
 import time
 import os
 import json
+import ssl
 from urllib.request import urlopen, Request
 from urllib.error import HTTPError
 
@@ -55,13 +56,20 @@ def fetch_json(url):
     request = Request(
         url,
         headers={
-            "User-Agent": "MM2D3DInfo/1.0",
-            "Accept": "application/json"
+            "User-Agent": "Mozilla/5.0 MM2D3DInfo/1.0",
+            "Accept": "application/json,text/plain,*/*"
         }
     )
 
     try:
-        with urlopen(request, timeout=30) as response:
+        ssl_context = None
+
+        # Render server မှာ TWSE SSL certificate verify error တက်နိုင်လို့
+        # openapi.twse.com.tw အတွက်ပဲ SSL verify bypass လုပ်ထားတာပါ
+        if "openapi.twse.com.tw" in url:
+            ssl_context = ssl._create_unverified_context()
+
+        with urlopen(request, timeout=30, context=ssl_context) as response:
             body = response.read().decode("utf-8", errors="ignore")
             return json.loads(body)
 
@@ -74,11 +82,11 @@ def get_market_session():
     now = myanmar_now()
     current = now.hour * 60 + now.minute
 
-    morning_open = 570
-    morning_close = 721
+    morning_open = 570      # 09:30 AM
+    morning_close = 721     # 12:01 PM
 
-    evening_open = 840
-    evening_close = 990
+    evening_open = 840      # 02:00 PM
+    evening_close = 990     # 04:30 PM
 
     status = "CLOSE"
     session = "none"
