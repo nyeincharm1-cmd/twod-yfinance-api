@@ -15,9 +15,40 @@ cached_today = None
 cached_time = 0
 last_error = ""
 
+daily_store = {
+    "date": "",
+    "morningSet": "--",
+    "morningValue": "--",
+    "morningResult": "--",
+    "morningUpdatedAt": "--",
+    "eveningSet": "--",
+    "eveningValue": "--",
+    "eveningResult": "--",
+    "eveningUpdatedAt": "--"
+}
+
 
 def myanmar_now():
     return datetime.utcnow() + timedelta(hours=6, minutes=30)
+
+
+def reset_daily_store_if_needed():
+    global daily_store
+
+    today = myanmar_now().strftime("%Y-%m-%d")
+
+    if daily_store["date"] != today:
+        daily_store = {
+            "date": today,
+            "morningSet": "--",
+            "morningValue": "--",
+            "morningResult": "--",
+            "morningUpdatedAt": "--",
+            "eveningSet": "--",
+            "eveningValue": "--",
+            "eveningResult": "--",
+            "eveningUpdatedAt": "--"
+        }
 
 
 def clean_text(raw_html):
@@ -160,6 +191,10 @@ def fetch_set_official():
 
 
 def build_result_data(set_data):
+    global daily_store
+
+    reset_daily_store_if_needed()
+
     now = myanmar_now()
     session_info = get_market_session()
 
@@ -177,23 +212,25 @@ def build_result_data(set_data):
     # Market Turnover 52,662.47 -> integer 52662 -> last digit = 2
     value_last_digit = get_value_last_digit(trading_value)
 
-    # Correct 2D formula:
-    # SET last digit + Market Turnover last digit
-    # Example: 6 + 0 = 60
+    # Correct 2D formula
     result_2d = set_last_digit + value_last_digit
 
+    updated_at = now.strftime("%Y-%m-%d %H:%M:%S")
     display_session = session_info["displaySession"]
 
-    morning_result = "--"
-    evening_result = "--"
-
+    # 12:00 PM row အတွက်သိမ်း
     if display_session == "morning":
-        morning_result = result_2d
-        evening_result = "--"
+        daily_store["morningSet"] = str(set_index)
+        daily_store["morningValue"] = str(trading_value)
+        daily_store["morningResult"] = result_2d
+        daily_store["morningUpdatedAt"] = updated_at
 
+    # 4:30 PM row အတွက်သိမ်း
     elif display_session == "evening":
-        morning_result = "--"
-        evening_result = result_2d
+        daily_store["eveningSet"] = str(set_index)
+        daily_store["eveningValue"] = str(trading_value)
+        daily_store["eveningResult"] = result_2d
+        daily_store["eveningUpdatedAt"] = updated_at
 
     return {
         "success": True,
@@ -214,10 +251,18 @@ def build_result_data(set_data):
         "valueLastDigit": value_last_digit,
 
         "result2d": result_2d,
-        "morningResult": morning_result,
-        "eveningResult": evening_result,
 
-        "updatedAt": now.strftime("%Y-%m-%d %H:%M:%S"),
+        "morningSet": daily_store["morningSet"],
+        "morningValue": daily_store["morningValue"],
+        "morningResult": daily_store["morningResult"],
+        "morningUpdatedAt": daily_store["morningUpdatedAt"],
+
+        "eveningSet": daily_store["eveningSet"],
+        "eveningValue": daily_store["eveningValue"],
+        "eveningResult": daily_store["eveningResult"],
+        "eveningUpdatedAt": daily_store["eveningUpdatedAt"],
+
+        "updatedAt": updated_at,
         "setLastUpdate": set_data["lastUpdateFromSET"],
         "setMarketStatus": set_data["marketStatusFromSET"],
 
@@ -234,7 +279,7 @@ def build_result_data(set_data):
 def home():
     return jsonify({
         "success": True,
-        "message": "SET Official Website API running with correct 2D formula",
+        "message": "SET Official Website API running with 12PM and 4:30PM rows",
         "source": SET_URL
     })
 
