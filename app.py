@@ -655,6 +655,18 @@ def normalize_history(raw_data):
         if day_counter < max_days_to_enrich:
             modern_data = get_modern_internet_for_date(date_iso, False)
 
+        if modern_data["morningModern"] == "--":
+            modern_data["morningModern"] = twod_or_dash(item_1100)
+
+        if modern_data["morningInternet"] == "--":
+            modern_data["morningInternet"] = twod_or_dash(item_1201)
+
+        if modern_data["eveningModern"] == "--":
+            modern_data["eveningModern"] = twod_or_dash(item_1500)
+
+        if modern_data["eveningInternet"] == "--":
+            modern_data["eveningInternet"] = twod_or_dash(item_1630)
+
         day_data = {
             "date": date_slash,
             "dateIso": date_iso,
