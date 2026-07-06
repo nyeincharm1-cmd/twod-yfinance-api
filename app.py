@@ -60,11 +60,12 @@ def get_market_session():
     now = myanmar_now()
     current = now.hour * 60 + now.minute
 
-    morning_open = 570      # 09:30 AM
-    morning_close = 721     # 12:01 PM
+    # Myanmar local time: 9:30 AM ~ 12:01 PM and 2:00 PM ~ 4:30 PM
+    morning_open = 570
+    morning_close = 721
 
-    evening_open = 840      # 02:00 PM
-    evening_close = 990     # 04:30 PM
+    evening_open = 840
+    evening_close = 990
 
     status = "CLOSE"
     session = "none"
@@ -148,102 +149,189 @@ def find_by_time(result_list, open_time):
 
 def time_to_seconds(time_text):
     try:
-        parts = str(time_text).split(":")
-        hour = int(parts[0])
-        minute = int(parts[1])
-        second = 0
+        time_text = str(time_text).strip()
 
-        if len(parts) >= 3:
-            second = int(parts[2])
+        # Example: 09:30:02
+        if ":" in time_text:
+            parts = time_text.split(":")
+            hour = int(parts[0])
+            minute = int(parts[1])
+            second = 0
 
-        return hour * 3600 + minute * 60 + second
+            if len(parts) >= 3:
+                second = int(parts[2])
+
+            return hour * 3600 + minute * 60 + second
+
+        return -1
 
     except:
         return -1
 
 
-def get_today_child_from_history(history_data):
-    if not isinstance(history_data, list):
+def extract_time(item):
+    if not isinstance(item, dict):
+        return ""
+
+    # ThaiStock2D history can return time / stock_time / open_time / stock_datetime
+    if item.get("time"):
+        return str(item.get("time"))
+
+    if item.get("stock_time"):
+        return str(item.get("stock_time"))
+
+    if item.get("open_time"):
+        return str(item.get("open_time"))
+
+    stock_datetime = str(item.get("stock_datetime", ""))
+    if " " in stock_datetime:
+        return stock_datetime.split(" ")[1]
+
+    return ""
+
+
+def extract_twod(item):
+    if not isinstance(item, dict):
+        return "--"
+
+    value = item.get("twod", None)
+
+    if value is None:
+        value = item.get("result", None)
+
+    if value is None:
+        value = item.get("number", None)
+
+    if value is None:
+        return "--"
+
+    text = str(value).strip()
+
+    if text == "":
+        return "--"
+
+    if len(text) == 1:
+        return "0" + text
+
+    return text[-2:]
+
+
+def normalize_history_change_items(raw_data):
+    """
+    /history or /history?date=YYYY-MM-DD response structure မတူနိုင်လို့
+    list ဖြစ်အောင် normalize လုပ်ထားတာ။
+    """
+    if isinstance(raw_data, list):
+        return raw_data
+
+    if not isinstance(raw_data, dict):
         return []
 
-    today_iso = myanmar_now().strftime("%Y-%m-%d")
+    possible_keys = [
+        "data",
+        "history",
+        "result",
+        "items",
+        "child",
+        "stock",
+        "stocks"
+    ]
 
-    for day in history_data:
-        if not isinstance(day, dict):
-            continue
+    for key in possible_keys:
+        value = raw_data.get(key)
 
-        date_text = str(day.get("date", ""))
+        if isinstance(value, list):
+            return value
 
-        if date_text == today_iso:
-            child = day.get("child", [])
+        if isinstance(value, dict):
+            child = value.get("child")
             if isinstance(child, list):
                 return child
-
-    # today မတွေ့ရင် first day ကို current latest အနေနဲ့ fallback သုံးမယ်
-    if len(history_data) > 0 and isinstance(history_data[0], dict):
-        child = history_data[0].get("child", [])
-        if isinstance(child, list):
-            return child
 
     return []
 
 
-def find_first_twod_after(child_list, start_time, end_time):
+def fetch_change_history_for_date(date_iso):
+    """
+    အရင် /history?date=YYYY-MM-DD နဲ့စမ်းမယ်။
+    မရရင် /history base endpoint ကို fallback သုံးမယ်။
+    """
+    try:
+        date_url = THAI_HISTORY_URL + "?date=" + date_iso
+        data = fetch_json(date_url)
+        items = normalize_history_change_items(data)
+
+        if len(items) > 0:
+            return items
+
+    except:
+        pass
+
+    try:
+        data = fetch_json(THAI_HISTORY_URL)
+        items = normalize_history_change_items(data)
+        return items
+
+    except:
+        return []
+
+
+def find_first_twod_between(items, start_time, end_time):
     start_sec = time_to_seconds(start_time)
     end_sec = time_to_seconds(end_time)
-
-    if start_sec < 0 or end_sec < 0:
-        return "--"
 
     best_item = None
     best_sec = None
 
-    if not isinstance(child_list, list):
+    if not isinstance(items, list):
         return "--"
 
-    for item in child_list:
+    for item in items:
         if not isinstance(item, dict):
             continue
 
-        item_time = str(item.get("time", ""))
+        item_time = extract_time(item)
         sec = time_to_seconds(item_time)
 
         if sec < 0:
             continue
 
         if sec >= start_sec and sec <= end_sec:
+            twod = extract_twod(item)
+
+            if twod == "--":
+                continue
+
             if best_sec is None or sec < best_sec:
                 best_sec = sec
                 best_item = item
 
-    return twod_or_dash(best_item)
+    return extract_twod(best_item)
 
 
-def find_second_different_twod_after(child_list, start_time, end_time, first_twod):
+def find_second_different_twod_between(items, start_time, end_time, first_twod):
     start_sec = time_to_seconds(start_time)
     end_sec = time_to_seconds(end_time)
-
-    if start_sec < 0 or end_sec < 0:
-        return "--"
 
     best_item = None
     best_sec = None
 
-    if not isinstance(child_list, list):
+    if not isinstance(items, list):
         return "--"
 
-    for item in child_list:
+    for item in items:
         if not isinstance(item, dict):
             continue
 
-        item_time = str(item.get("time", ""))
+        item_time = extract_time(item)
         sec = time_to_seconds(item_time)
-        twod = twod_or_dash(item)
 
         if sec < 0:
             continue
 
         if sec >= start_sec and sec <= end_sec:
+            twod = extract_twod(item)
+
             if twod == "--":
                 continue
 
@@ -254,7 +342,57 @@ def find_second_different_twod_after(child_list, start_time, end_time, first_two
                 best_sec = sec
                 best_item = item
 
-    return twod_or_dash(best_item)
+    return extract_twod(best_item)
+
+
+def get_modern_internet_for_date(date_iso):
+    """
+    History card တစ်ရက်ချင်းအတွက် Modern / Internet ကို
+    stock change history မှယူမယ်။
+
+    9:30 AM panel:
+      Modern = 09:30-10:59 ထဲက first twod
+      Internet = first နဲ့မတူတဲ့ next twod
+
+    2:00 PM panel:
+      Modern = 14:00-14:59 ထဲက first twod
+      Internet = first နဲ့မတူတဲ့ next twod
+    """
+    items = fetch_change_history_for_date(date_iso)
+
+    morning_modern = find_first_twod_between(
+        items,
+        "09:30:00",
+        "10:59:59"
+    )
+
+    morning_internet = find_second_different_twod_between(
+        items,
+        "09:30:00",
+        "10:59:59",
+        morning_modern
+    )
+
+    evening_modern = find_first_twod_between(
+        items,
+        "14:00:00",
+        "14:59:59"
+    )
+
+    evening_internet = find_second_different_twod_between(
+        items,
+        "14:00:00",
+        "14:59:59",
+        evening_modern
+    )
+
+    return {
+        "morningModern": morning_modern,
+        "morningInternet": morning_internet,
+        "morningTW": "--",
+        "eveningModern": evening_modern,
+        "eveningInternet": evening_internet
+    }
 
 
 def format_time_12h(raw_time):
@@ -293,7 +431,7 @@ def format_date_title(date_text):
         return str(date_text)
 
 
-def build_today_response(live_data, history_data):
+def build_today_response(live_data):
     session_info = get_market_session()
 
     live = live_data.get("live", {})
@@ -311,48 +449,20 @@ def build_today_response(live_data, history_data):
     live_date = str(live.get("date", session_info["date"]))
     live_time = str(live.get("time", "--"))
 
-    today_child = get_today_child_from_history(history_data)
+    modern_data = get_modern_internet_for_date(live_date)
 
-    # 9:30 AM panel
-    morning_modern = find_first_twod_after(
-        today_child,
-        "09:30:00",
-        "10:59:59"
-    )
+    # fallback: current day /history မရရင် fixed result ကို fallback
+    if modern_data["morningModern"] == "--":
+        modern_data["morningModern"] = twod_or_dash(morning_1100)
 
-    morning_internet = find_second_different_twod_after(
-        today_child,
-        "09:30:00",
-        "10:59:59",
-        morning_modern
-    )
+    if modern_data["morningInternet"] == "--":
+        modern_data["morningInternet"] = twod_or_dash(morning_1201)
 
-    # 2:00 PM panel
-    evening_modern = find_first_twod_after(
-        today_child,
-        "14:00:00",
-        "14:59:59"
-    )
+    if modern_data["eveningModern"] == "--":
+        modern_data["eveningModern"] = twod_or_dash(evening_1500)
 
-    evening_internet = find_second_different_twod_after(
-        today_child,
-        "14:00:00",
-        "14:59:59",
-        evening_modern
-    )
-
-    # fallback: history ထဲ 9:30 / 2:00 နားမှာ data မရှိသေးရင် fixed result value သုံးမယ်
-    if morning_modern == "--":
-        morning_modern = twod_or_dash(morning_1100)
-
-    if morning_internet == "--":
-        morning_internet = twod_or_dash(morning_1201)
-
-    if evening_modern == "--":
-        evening_modern = twod_or_dash(evening_1500)
-
-    if evening_internet == "--":
-        evening_internet = twod_or_dash(evening_1630)
+    if modern_data["eveningInternet"] == "--":
+        modern_data["eveningInternet"] = twod_or_dash(evening_1630)
 
     return {
         "success": True,
@@ -391,14 +501,12 @@ def build_today_response(live_data, history_data):
         "eveningResult": twod_or_dash(evening_1630),
         "eveningUpdatedAt": str(evening_1630.get("stock_datetime", "--")) if evening_1630 else "--",
 
-        "morningModern": morning_modern,
-        "morningInternet": morning_internet,
+        "morningModern": modern_data["morningModern"],
+        "morningInternet": modern_data["morningInternet"],
+        "morningTW": modern_data["morningTW"],
 
-        # TW data ကို ThaiStock2D API က မပေးသေးလို့ real data မရှိသေးပါ
-        "morningTW": "--",
-
-        "eveningModern": evening_modern,
-        "eveningInternet": evening_internet,
+        "eveningModern": modern_data["eveningModern"],
+        "eveningInternet": modern_data["eveningInternet"],
 
         "updatedAt": live_time,
         "serverTime": str(live_data.get("server_time", "--")),
@@ -418,6 +526,10 @@ def normalize_history(raw_data):
         return flat_history, day_list
 
     seen = set()
+
+    # Render timeout မဖြစ်အောင် history days 20 ရက်အထိပဲ enrich လုပ်မယ်
+    max_days_to_enrich = 20
+    day_counter = 0
 
     for day in raw_data:
         if not isinstance(day, dict):
@@ -453,6 +565,20 @@ def normalize_history(raw_data):
                 elif item_time == "16:30:00":
                     item_1630 = item
 
+        modern_data = {
+            "morningModern": "--",
+            "morningInternet": "--",
+            "morningTW": "--",
+            "eveningModern": "--",
+            "eveningInternet": "--"
+        }
+
+        if day_counter < max_days_to_enrich:
+            modern_data = get_modern_internet_for_date(date_iso)
+
+        # fallback မလုပ်တော့ဘူး — မှားတဲ့ Modern / Internet မပြချင်လို့
+        # history?date မရရင် -- ပဲထားမယ်
+
         day_data = {
             "date": date_slash,
             "dateIso": date_iso,
@@ -484,10 +610,17 @@ def normalize_history(raw_data):
                 "set": value_or_dash(item_1630, "set"),
                 "value": value_or_dash(item_1630, "value"),
                 "result": twod_or_dash(item_1630)
-            }
+            },
+
+            "morningModern": modern_data["morningModern"],
+            "morningInternet": modern_data["morningInternet"],
+            "morningTW": modern_data["morningTW"],
+            "eveningModern": modern_data["eveningModern"],
+            "eveningInternet": modern_data["eveningInternet"]
         }
 
         day_list.append(day_data)
+        day_counter += 1
 
         for item in [item_1201, item_1630]:
             if item is None:
@@ -515,7 +648,13 @@ def normalize_history(raw_data):
                 "result": result,
                 "twod": result,
                 "set": set_value,
-                "value": market_value
+                "value": market_value,
+
+                "morningModern": modern_data["morningModern"],
+                "morningInternet": modern_data["morningInternet"],
+                "morningTW": modern_data["morningTW"],
+                "eveningModern": modern_data["eveningModern"],
+                "eveningInternet": modern_data["eveningInternet"]
             })
 
     return flat_history, day_list
@@ -547,9 +686,7 @@ def today():
 
     try:
         live_data = fetch_json(THAI_LIVE_URL)
-        history_data = fetch_json(THAI_HISTORY_URL)
-
-        response = build_today_response(live_data, history_data)
+        response = build_today_response(live_data)
 
         cached_today = response
         cached_today_time = now_time
