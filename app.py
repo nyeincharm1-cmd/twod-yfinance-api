@@ -477,7 +477,6 @@ def normalize_finmind_items(raw_data):
     if isinstance(data, dict):
         rows = []
 
-        # column-list format ဖြစ်ခဲ့ရင် row-list ပြန်ပြောင်းရန်
         keys = list(data.keys())
         if len(keys) == 0:
             return []
@@ -492,6 +491,7 @@ def normalize_finmind_items(raw_data):
 
                 for key in keys:
                     value_list = data.get(key, [])
+
                     if isinstance(value_list, list) and i < len(value_list):
                         row[key] = value_list[i]
 
@@ -508,7 +508,7 @@ def get_item_time_text(item):
 
     value = item.get("date", "")
 
-    if value is None:
+    if value is None or str(value).strip() == "":
         value = item.get("time", "")
 
     return str(value)
@@ -549,77 +549,84 @@ def get_finmind_tw_latest_info():
         if now_time - cached_tw_time < TW_CACHE_SECONDS:
             return cached_tw_info
 
-    end_date = taiwan_now().strftime("%Y-%m-%d")
-    start_date = (taiwan_now() - timedelta(days=14)).strftime("%Y-%m-%d")
-
-    params = {
-        "dataset": "TaiwanVariousIndicators5Seconds",
-        "start_date": start_date,
-        "end_date": end_date
-    }
-
-    if FINMIND_TOKEN is not None and FINMIND_TOKEN.strip() != "":
-        params["token"] = FINMIND_TOKEN.strip()
-
-    url = build_url(FINMIND_API_URL, params)
-
     info = {
         "result": "--",
         "latestTime": "--",
         "latestTAIEX": "--",
         "sourceUrl": FINMIND_API_URL,
         "dataset": "TaiwanVariousIndicators5Seconds",
-        "startDate": start_date,
-        "endDate": end_date,
+        "startDate": "--",
+        "endDate": "none",
         "count": 0,
-        "error": ""
+        "error": "",
+        "triedDates": []
     }
 
-    try:
-        raw_data = fetch_json(url)
-        items = normalize_finmind_items(raw_data)
+    # ဒီ dataset က end_date ထည့်လို့မရပါ
+    # start_date တစ်ခုတည်းနဲ့ နောက်ပြန် 14 ရက်ထိ စမ်းမယ်
+    for day_back in range(0, 14):
+        check_date = (taiwan_now() - timedelta(days=day_back)).strftime("%Y-%m-%d")
 
-        info["count"] = len(items)
+        params = {
+            "dataset": "TaiwanVariousIndicators5Seconds",
+            "start_date": check_date
+        }
 
-        if len(items) == 0:
-            info["error"] = "FinMind returned empty data"
-            return info
+        if FINMIND_TOKEN is not None and FINMIND_TOKEN.strip() != "":
+            params["token"] = FINMIND_TOKEN.strip()
 
-        latest_item = None
-        latest_time = ""
+        url = build_url(FINMIND_API_URL, params)
+        info["triedDates"].append(check_date)
 
-        for item in items:
-            if not isinstance(item, dict):
+        try:
+            raw_data = fetch_json(url)
+            items = normalize_finmind_items(raw_data)
+
+            if len(items) == 0:
+                if isinstance(raw_data, dict):
+                    msg = raw_data.get("msg", "")
+                    if msg:
+                        info["error"] = str(msg)
                 continue
 
-            time_text = get_item_time_text(item)
+            latest_item = None
+            latest_time = ""
 
-            if latest_item is None or time_text > latest_time:
-                latest_item = item
-                latest_time = time_text
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
 
-        if latest_item is None:
-            info["error"] = "No latest item found"
-            return info
+                time_text = get_item_time_text(item)
 
-        taiex_value = get_taiex_value(latest_item)
-        tw_result = get_tw_result_from_index(taiex_value)
+                if latest_item is None or time_text > latest_time:
+                    latest_item = item
+                    latest_time = time_text
 
-        info["latestTime"] = latest_time
-        info["latestTAIEX"] = taiex_value
-        info["result"] = tw_result
+            if latest_item is None:
+                continue
 
-        if tw_result == "--":
+            taiex_value = get_taiex_value(latest_item)
+            tw_result = get_tw_result_from_index(taiex_value)
+
+            if tw_result != "--":
+                info["startDate"] = check_date
+                info["count"] = len(items)
+                info["latestTime"] = latest_time
+                info["latestTAIEX"] = taiex_value
+                info["result"] = tw_result
+                info["error"] = ""
+
+                cached_tw_info = info
+                cached_tw_time = now_time
+
+                return info
+
             info["error"] = "TAIEX field not found or invalid"
 
-        cached_tw_info = info
-        cached_tw_time = now_time
+        except Exception as e:
+            info["error"] = str(e)
 
-        return info
-
-    except Exception as e:
-        info["error"] = str(e)
-        return info
+    return info
 
 
 def get_tw_result():
@@ -995,7 +1002,8 @@ def tw_check():
         "sourceUrl": FINMIND_API_URL,
         "dataset": info.get("dataset", "TaiwanVariousIndicators5Seconds"),
         "startDate": info.get("startDate", "--"),
-        "endDate": info.get("endDate", "--"),
+        "endDate": info.get("endDate", "none"),
+        "triedDates": info.get("triedDates", []),
         "count": info.get("count", 0),
         "latestTime": info.get("latestTime", "--"),
         "latestTAIEX": info.get("latestTAIEX", "--"),
