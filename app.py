@@ -19,10 +19,11 @@ RAPIDAPI_HOST = os.environ.get(
 )
 RAPIDAPI_HISTORY_URL = os.environ.get(
     "RAPIDAPI_HISTORY_URL",
-    "https://myanmar-all-in-one-2d-results.p.rapidapi.com/api/v1/calendar"
+    "https://myanmar-all-in-one-2d-results.p.rapidapi.com/api/v1/daily"
 )
 
 CACHE_SECONDS = 10
+HISTORY_CACHE_SECONDS = 300
 
 cached_today = None
 cached_time = 0
@@ -30,7 +31,6 @@ last_error = ""
 
 cached_history = None
 cached_history_time = 0
-HISTORY_CACHE_SECONDS = 300
 
 daily_store = {
     "date": "",
@@ -89,12 +89,19 @@ def get_set_decimal_two(price):
 
 def get_value_last_digit(value):
     text = str(value)
+
+    # decimal မတိုင်ခင် integer part ပဲယူမယ်
+    # Example: 52,662.47 -> 52,662
     integer_part = text.split(".")[0]
+
+    # comma ဖယ်မယ်
+    # Example: 52,662 -> 52662
     digits = "".join(ch for ch in integer_part if ch.isdigit())
 
     if len(digits) == 0:
         return "0"
 
+    # Example: 52662 -> 2
     return digits[-1]
 
 
@@ -102,11 +109,12 @@ def get_market_session():
     now = myanmar_now()
     current = now.hour * 60 + now.minute
 
-    morning_open = 480
-    morning_close = 721
+    # Myanmar Time
+    morning_open = 480      # 08:00 AM
+    morning_close = 721     # 12:01 PM
 
-    evening_open = 780
-    evening_close = 991
+    evening_open = 780      # 01:00 PM
+    evening_close = 991     # 04:31 PM
 
     status = "CLOSE"
     session = "none"
@@ -176,6 +184,8 @@ def fetch_set_official():
     if update_match:
         last_update = update_match.group(1)
 
+    # Official SET row example:
+    # SET 1,616.34 +5.06 7,205,959 50,797.41
     set_pattern = r"\bSET\s+([\d,]+\.\d{2})\s+([+-][\d,]+\.\d{2})\s+([\d,]+)\s+([\d,]+\.\d{2})"
     set_match = re.search(set_pattern, text)
 
@@ -208,6 +218,7 @@ def build_result_data(set_data):
     set_index = set_data["setIndex"]
     trading_value = set_data["tradingValue"]
 
+    # SET Index 1342.56 -> decimal two = 56 -> last digit = 6
     set_decimal_two = get_set_decimal_two(set_index)
 
     if set_decimal_two == "--":
@@ -215,19 +226,24 @@ def build_result_data(set_data):
     else:
         set_last_digit = set_decimal_two[-1]
 
+    # Market Turnover 52,662.47 -> integer 52662 -> last digit = 2
     value_last_digit = get_value_last_digit(trading_value)
 
+    # Correct 2D formula
+    # SET decimal last digit + Market turnover last digit
     result_2d = set_last_digit + value_last_digit
 
     updated_at = now.strftime("%Y-%m-%d %H:%M:%S")
     display_session = session_info["displaySession"]
 
+    # 12:00 PM row
     if display_session == "morning":
         daily_store["morningSet"] = str(set_index)
         daily_store["morningValue"] = str(trading_value)
         daily_store["morningResult"] = result_2d
         daily_store["morningUpdatedAt"] = updated_at
 
+    # 4:30 PM row
     elif display_session == "evening":
         daily_store["eveningSet"] = str(set_index)
         daily_store["eveningValue"] = str(trading_value)
@@ -303,18 +319,35 @@ def fetch_rapidapi_history():
 def normalize_history(raw_data):
     items = []
 
+    # /api/v1/daily response structure:
+    # {
+    #   "status": 200,
+    #   "condition": "🚀",
+    #   "data": {
+    #       "dailyTwoD": [...]
+    #   }
+    # }
     if isinstance(raw_data, dict):
-        if "twoDCalendar" in raw_data:
+        data = raw_data.get("data")
+
+        if isinstance(data, dict):
+            if "dailyTwoD" in data:
+                items = data.get("dailyTwoD", [])
+
+        elif isinstance(data, list):
+            items = data
+
+        elif "twoDCalendar" in raw_data:
             items = raw_data.get("twoDCalendar", [])
-        elif "data" in raw_data:
-            items = raw_data.get("data", [])
-        elif "result" in raw_data:
-            items = raw_data.get("result", [])
+
+        elif "dailyTwoD" in raw_data:
+            items = raw_data.get("dailyTwoD", [])
 
     elif isinstance(raw_data, list):
         items = raw_data
 
     history = []
+    seen = set()
 
     for item in items:
         if not isinstance(item, dict):
@@ -325,6 +358,14 @@ def normalize_history(raw_data):
         result = str(item.get("result", "--"))
         set_value = str(item.get("set", "--"))
         market_value = str(item.get("value", "--"))
+
+        # Duplicate data ဖယ်မယ်
+        unique_key = date + "|" + time_value + "|" + result + "|" + set_value + "|" + market_value
+
+        if unique_key in seen:
+            continue
+
+        seen.add(unique_key)
 
         history.append({
             "date": date,
@@ -344,6 +385,7 @@ def home():
         "message": "MM 2D 3D API running",
         "today": "/today",
         "history": "/history",
+        "statusApi": "/status",
         "source": SET_URL
     })
 
